@@ -400,9 +400,14 @@ async function resolvePackSearchPath(searchPathInput?: string): Promise<string> 
     return path.resolve(process.cwd(), searchPathInput);
   }
 
-  const builtInPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../examples/bundles");
-  if (await fs.pathExists(builtInPath)) {
-    return builtInPath;
+  const packageBuiltinPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "builtin");
+  if (await fs.pathExists(packageBuiltinPath)) {
+    return packageBuiltinPath;
+  }
+
+  const repoBuiltinPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../examples/bundles");
+  if (await fs.pathExists(repoBuiltinPath)) {
+    return repoBuiltinPath;
   }
 
   return process.cwd();
