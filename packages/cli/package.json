@@ -1,5 +1,5 @@
 {
-  "name": "skillcast",
+  "name": "@stephenlumban/skillcast",
   "version": "0.1.0",
   "description": "CLI for reusable agent skill bundles",
   "type": "module",

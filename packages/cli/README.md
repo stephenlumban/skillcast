@@ -5,7 +5,7 @@ Skillcast is a CLI and open format for reusable agent skill bundles.
 ## Install
 
 ```bash
-npm install -g skillcast
+npm install -g @stephenlumban/skillcast
 ```
 
 ## Commands
