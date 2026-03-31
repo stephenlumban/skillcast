@@ -35,11 +35,22 @@ await run("install built-in pack writes manifest entry and list installed return
     const bundles = await getInstalledBundles();
 
     assert.ok(bundles.some((bundle) =>
-      bundle.name === "debug-triage-pack" &&
+      bundle.bundle === "debug-triage-pack" &&
+      bundle.bundleVersion === "0.1.0" &&
       bundle.sourceType === "builtin" &&
-      bundle.targetDir === ".skillcast/bundles/debug-triage-pack"
+      bundle.skillDir === ".skillcast/skills" &&
+      bundle.installedSkills.includes("bug-triage")
     ));
-    assert.ok(await fs.pathExists(path.join(tempRepo, ".skillcast", "bundles", "debug-triage-pack", "bundle.yaml")));
+    assert.ok(await fs.pathExists(path.join(tempRepo, ".skillcast", "skills", "bug-triage", "SKILL.md")));
+    assert.ok(await fs.pathExists(path.join(tempRepo, ".skillcast", "skills", "fix-verification", "SKILL.md")));
+
+    const bugTriageSkill = await fs.readFile(
+      path.join(tempRepo, ".skillcast", "skills", "bug-triage", "SKILL.md"),
+      "utf8"
+    );
+    assert.match(bugTriageSkill, /# bug-triage/);
+    assert.match(bugTriageSkill, /## Instructions/);
+    assert.match(bugTriageSkill, /Bundle: debug-triage-pack@0\.1\.0/);
   } finally {
     process.chdir(previousCwd);
     await fs.remove(tempRepo);

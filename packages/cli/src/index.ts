@@ -63,12 +63,13 @@ type ValidatedBundle = {
 };
 
 type ManifestEntry = {
-  name: string;
-  version: string;
+  bundle: string;
+  bundleVersion: string;
   source: string;
   sourceType: "builtin" | "path";
+  installedSkills: string[];
   installedAt: string;
-  targetDir: string;
+  skillDir: string;
 };
 
 type ResolvedBundleReference = {
@@ -118,12 +119,13 @@ export type InspectPayload = {
 };
 
 export type InstalledListItem = {
-  name: string;
-  version: string;
+  bundle: string;
+  bundleVersion: string;
   source: string;
   sourceType: "builtin" | "path";
+  installedSkills: string[];
   installedAt: string;
-  targetDir: string;
+  skillDir: string;
 };
 
 const MANIFEST_VERSION = 1;
@@ -188,7 +190,7 @@ program
     const result = await installBundle(bundleRef);
     console.log(`Installed ${result.name}@${result.version}`);
     console.log(`Source: ${result.source}`);
-    console.log(`Target: ${result.targetDir}`);
+    console.log(`Skill Dir: ${result.skillDir}`);
     console.log(`Manifest: ${result.manifestPath}`);
   });
 
@@ -332,12 +334,13 @@ async function readManifest(manifestPath: string): Promise<{ manifestVersion: nu
   const manifest = z.object({
     manifestVersion: z.number().int().positive(),
     bundles: z.array(z.object({
-      name: z.string(),
-      version: z.string(),
+      bundle: z.string(),
+      bundleVersion: z.string(),
       source: z.string(),
       sourceType: z.enum(["builtin", "path"]).default("path"),
+      installedSkills: z.array(z.string()).default([]),
       installedAt: z.string(),
-      targetDir: z.string()
+      skillDir: z.string()
     }))
   }).parse(raw);
 
@@ -487,10 +490,11 @@ async function handleListCommand(args: string[]): Promise<void> {
 
     console.log(`Manifest: ${toDisplayPath(manifestPath)}`);
     for (const bundle of payload) {
-      console.log(`${bundle.name}@${bundle.version}`);
+      console.log(`${bundle.bundle}@${bundle.bundleVersion}`);
       console.log(`  Installed: ${bundle.installedAt}`);
       console.log(`  Source: ${bundle.source} (${bundle.sourceType})`);
-      console.log(`  Target: ${bundle.targetDir}`);
+      console.log(`  Skill Dir: ${bundle.skillDir}`);
+      console.log(`  Skills: ${bundle.installedSkills.join(", ")}`);
     }
     return;
   }
@@ -643,32 +647,31 @@ export async function installBundle(bundleRef: string): Promise<{
   name: string;
   version: string;
   source: string;
-  targetDir: string;
+  skillDir: string;
   manifestPath: string;
 }> {
   const resolved = await resolveBundleReference(bundleRef);
   const bundle = await validateBundleRoot(resolved.rootPath);
   const repoRoot = process.cwd();
   const skillcastDir = path.join(repoRoot, ".skillcast");
-  const bundlesDir = path.join(skillcastDir, "bundles");
-  const targetDir = path.join(bundlesDir, bundle.config.name);
+  const installedSkillsDir = path.join(skillcastDir, "skills");
 
-  await fs.ensureDir(bundlesDir);
-  await fs.remove(targetDir);
-  await fs.copy(bundle.rootPath, targetDir);
+  await fs.ensureDir(installedSkillsDir);
+  await projectInstalledSkills(bundle, repoRoot);
 
   const manifestPath = path.join(skillcastDir, "manifest.json");
   const manifest = await readManifest(manifestPath);
   const entry: ManifestEntry = {
-    name: bundle.config.name,
-    version: bundle.config.version,
+    bundle: bundle.config.name,
+    bundleVersion: bundle.config.version,
     source: resolved.displaySource,
     sourceType: resolved.referenceType,
+    installedSkills: bundle.skills.map((skill) => skill.config.name),
     installedAt: new Date().toISOString(),
-    targetDir: toPosix(path.relative(repoRoot, targetDir))
+    skillDir: toPosix(path.relative(repoRoot, installedSkillsDir))
   };
 
-  manifest.bundles = manifest.bundles.filter((item) => item.name !== entry.name);
+  manifest.bundles = manifest.bundles.filter((item) => item.bundle !== entry.bundle);
   manifest.bundles.push(entry);
   await fs.writeJson(manifestPath, manifest, { spaces: 2 });
 
@@ -676,7 +679,7 @@ export async function installBundle(bundleRef: string): Promise<{
     name: bundle.config.name,
     version: bundle.config.version,
     source: resolved.displaySource,
-    targetDir: toPosix(path.relative(repoRoot, targetDir)),
+    skillDir: toPosix(path.relative(repoRoot, installedSkillsDir)),
     manifestPath: toPosix(path.relative(repoRoot, manifestPath))
   };
 }
@@ -719,14 +722,15 @@ export async function getInstalledBundles(): Promise<InstalledListItem[]> {
   const manifest = await readManifest(manifestPath);
   return manifest.bundles
     .slice()
-    .sort((left, right) => left.name.localeCompare(right.name))
+    .sort((left, right) => left.bundle.localeCompare(right.bundle))
     .map((bundle) => ({
-      name: bundle.name,
-      version: bundle.version,
+      bundle: bundle.bundle,
+      bundleVersion: bundle.bundleVersion,
       source: bundle.source,
       sourceType: bundle.sourceType,
+      installedSkills: bundle.installedSkills,
       installedAt: bundle.installedAt,
-      targetDir: bundle.targetDir
+      skillDir: bundle.skillDir
     }));
 }
 
@@ -739,4 +743,59 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     }
     process.exitCode = 1;
   });
+}
+
+async function projectInstalledSkills(bundle: ValidatedBundle, repoRoot: string): Promise<void> {
+  const installedSkillsDir = path.join(repoRoot, ".skillcast", "skills");
+
+  for (const skill of bundle.skills) {
+    const skillFolder = path.join(installedSkillsDir, skill.config.name);
+    const canonicalSkillPath = path.join(installedSkillsDir, skill.config.name);
+
+    await fs.ensureDir(skillFolder);
+    await fs.writeFile(
+      path.join(skillFolder, "SKILL.md"),
+      await renderInstalledSkill(bundle, skill, canonicalSkillPath),
+      "utf8"
+    );
+  }
+}
+
+async function renderInstalledSkill(
+  bundle: ValidatedBundle,
+  skill: ValidatedSkill,
+  canonicalSkillPath: string
+): Promise<string> {
+  const sections: string[] = [
+    `# ${skill.config.name}`,
+    "",
+    skill.config.description,
+    "",
+    "## Source",
+    "",
+    `- Bundle: ${bundle.config.name}@${bundle.config.version}`,
+    `- Skill ID: ${skill.config.id}`,
+    `- Canonical Path: ${toPosix(canonicalSkillPath)}`,
+    `- Compatibility: ${skill.config.compatibility.runtimes.join(", ")}`,
+    ""
+  ];
+
+  if (skill.config.inputs.length > 0) {
+    sections.push("## Inputs", "");
+    for (const input of skill.config.inputs) {
+      sections.push(`- ${input.name}: ${input.type}${input.required ? " (required)" : ""}`);
+    }
+    sections.push("");
+  }
+
+  if (skill.config.outputs.length > 0) {
+    sections.push("## Outputs", "");
+    for (const output of skill.config.outputs) {
+      sections.push(`- ${output.name}: ${output.type}`);
+    }
+    sections.push("");
+  }
+
+  sections.push("## Instructions", "", (await fs.readFile(skill.instructionsPath, "utf8")).trim(), "");
+  return sections.join("\n");
 }

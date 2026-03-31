@@ -33,6 +33,15 @@ examples/bundles/            Built-in pack catalog and example bundles
 docs/spec/                   v0 bundle and skill specs
 ```
 
+## Install Behavior
+
+`skillcast install <pack>` now installs only the repo-local skills that the agent actually uses:
+
+- `.skillcast/skills/<skill-name>/SKILL.md`
+- `.skillcast/manifest.json`
+
+Bundles remain a platform-level distribution concept. The repo stores installed skills plus manifest provenance, not vendored bundle source.
+
 ## Example Bundles
 
 - `pr-review-pack`: minimal v0 example from the original handover
