@@ -1,0 +1,16 @@
+id: org.skillcast.repo-onboarding.conventions-finder
+name: conventions-finder
+version: 0.1.0
+description: Extracts coding standards, naming patterns, and tooling conventions
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: repo_context
+    type: string
+    required: true
+outputs:
+  - name: conventions_summary
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

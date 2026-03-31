@@ -1,0 +1,16 @@
+id: org.skillcast.repo-onboarding.change-impact-scan
+name: change-impact-scan
+version: 0.1.0
+description: Identifies likely blast radius for a proposed change
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: proposed_change
+    type: string
+    required: true
+outputs:
+  - name: impact_summary
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

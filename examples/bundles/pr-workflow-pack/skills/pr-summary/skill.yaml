@@ -1,0 +1,16 @@
+id: org.skillcast.pr-workflow.pr-summary
+name: pr-summary
+version: 0.1.0
+description: Writes a clean pull request description from changes
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: change_context
+    type: string
+    required: true
+outputs:
+  - name: pr_description
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

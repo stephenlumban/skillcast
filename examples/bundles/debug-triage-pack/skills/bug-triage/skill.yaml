@@ -1,0 +1,16 @@
+id: org.skillcast.debug-triage.bug-triage
+name: bug-triage
+version: 0.1.0
+description: Turns a vague issue into repro steps, hypotheses, and next checks
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: issue_report
+    type: string
+    required: true
+outputs:
+  - name: triage_report
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

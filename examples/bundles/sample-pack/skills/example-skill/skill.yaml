@@ -1,0 +1,16 @@
+id: org.example.sample-pack.example-skill
+name: example-skill
+version: 0.1.0
+description: Describe this skill
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: input
+    type: string
+    required: true
+outputs:
+  - name: result
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

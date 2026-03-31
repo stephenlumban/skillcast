@@ -1,0 +1,37 @@
+{
+  "catalogVersion": 1,
+  "packs": [
+    {
+      "name": "repo-onboarding-pack",
+      "path": "./repo-onboarding-pack",
+      "description": "Repo understanding and onboarding workflow bundle",
+      "category": "onboarding",
+      "tags": ["repo", "architecture", "setup", "conventions", "impact"],
+      "featured": true
+    },
+    {
+      "name": "pr-workflow-pack",
+      "path": "./pr-workflow-pack",
+      "description": "Pull request review and iteration workflow bundle",
+      "category": "workflow",
+      "tags": ["pr", "review", "summary", "commit", "risk"],
+      "featured": true
+    },
+    {
+      "name": "debug-triage-pack",
+      "path": "./debug-triage-pack",
+      "description": "Debugging and engineering triage workflow bundle",
+      "category": "debugging",
+      "tags": ["triage", "logs", "tests", "repro", "verification"],
+      "featured": true
+    },
+    {
+      "name": "pr-review-pack",
+      "path": "./pr-review-pack",
+      "description": "Minimal PR review workflow bundle",
+      "category": "workflow",
+      "tags": ["pr", "review"],
+      "featured": false
+    }
+  ]
+}

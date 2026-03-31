@@ -1,0 +1,8 @@
+name: pr-review-pack
+version: 0.1.0
+description: PR review workflow bundle
+skills:
+  - name: code-review
+    path: ./skills/code-review
+targets:
+  - generic-agent

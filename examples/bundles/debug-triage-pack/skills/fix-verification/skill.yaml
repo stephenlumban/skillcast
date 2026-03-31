@@ -1,0 +1,16 @@
+id: org.skillcast.debug-triage.fix-verification
+name: fix-verification
+version: 0.1.0
+description: Confirms what should be retested after a patch
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: fix_context
+    type: string
+    required: true
+outputs:
+  - name: verification_plan
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

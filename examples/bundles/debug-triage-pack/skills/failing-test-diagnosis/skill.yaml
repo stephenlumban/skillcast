@@ -1,0 +1,16 @@
+id: org.skillcast.debug-triage.failing-test-diagnosis
+name: failing-test-diagnosis
+version: 0.1.0
+description: Inspects failing tests and isolates probable root cause
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: test_failure
+    type: string
+    required: true
+outputs:
+  - name: diagnosis
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

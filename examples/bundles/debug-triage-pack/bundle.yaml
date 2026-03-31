@@ -1,0 +1,16 @@
+name: debug-triage-pack
+version: 0.1.0
+description: Debugging and engineering triage workflow bundle
+skills:
+  - name: bug-triage
+    path: ./skills/bug-triage
+  - name: log-investigation
+    path: ./skills/log-investigation
+  - name: failing-test-diagnosis
+    path: ./skills/failing-test-diagnosis
+  - name: minimal-repro-plan
+    path: ./skills/minimal-repro-plan
+  - name: fix-verification
+    path: ./skills/fix-verification
+targets:
+  - generic-agent

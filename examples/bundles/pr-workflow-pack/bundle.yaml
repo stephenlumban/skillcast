@@ -1,0 +1,16 @@
+name: pr-workflow-pack
+version: 0.1.0
+description: Pull request review and iteration workflow bundle
+skills:
+  - name: pr-review
+    path: ./skills/pr-review
+  - name: pr-summary
+    path: ./skills/pr-summary
+  - name: commit-message
+    path: ./skills/commit-message
+  - name: review-fix-pass
+    path: ./skills/review-fix-pass
+  - name: risk-check
+    path: ./skills/risk-check
+targets:
+  - generic-agent

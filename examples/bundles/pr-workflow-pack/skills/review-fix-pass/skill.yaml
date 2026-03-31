@@ -1,0 +1,16 @@
+id: org.skillcast.pr-workflow.review-fix-pass
+name: review-fix-pass
+version: 0.1.0
+description: Applies review feedback consistently across related changes
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: review_feedback
+    type: string
+    required: true
+outputs:
+  - name: fix_plan
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

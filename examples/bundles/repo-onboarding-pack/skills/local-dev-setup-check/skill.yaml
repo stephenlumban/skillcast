@@ -1,0 +1,16 @@
+id: org.skillcast.repo-onboarding.local-dev-setup-check
+name: local-dev-setup-check
+version: 0.1.0
+description: Finds how to run, lint, test, and build the repo locally
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: repo_path
+    type: string
+    required: true
+outputs:
+  - name: setup_report
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

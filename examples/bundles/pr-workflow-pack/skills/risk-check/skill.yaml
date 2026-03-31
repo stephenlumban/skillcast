@@ -1,0 +1,16 @@
+id: org.skillcast.pr-workflow.risk-check
+name: risk-check
+version: 0.1.0
+description: Flags migrations, security-sensitive changes, and rollback risks
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: diff
+    type: string
+    required: true
+outputs:
+  - name: risk_report
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

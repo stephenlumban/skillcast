@@ -1,0 +1,45 @@
+{
+  "name": "skillcast",
+  "version": "0.1.0",
+  "description": "CLI for reusable agent skill bundles",
+  "type": "module",
+  "bin": {
+    "skillcast": "dist/index.js",
+    "cast": "dist/index.js"
+  },
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "test": "node dist/test/run-smoke-tests.js",
+    "prepack": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/stephenlumban/skillcast.git"
+  },
+  "homepage": "https://github.com/stephenlumban/skillcast#readme",
+  "bugs": {
+    "url": "https://github.com/stephenlumban/skillcast/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^14.0.0",
+    "fs-extra": "^11.3.2",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.15.30",
+    "typescript": "^5.9.2"
+  }
+}

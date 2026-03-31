@@ -1,0 +1,16 @@
+name: repo-onboarding-pack
+version: 0.1.0
+description: Repo understanding and onboarding workflow bundle
+skills:
+  - name: repo-map
+    path: ./skills/repo-map
+  - name: architecture-explainer
+    path: ./skills/architecture-explainer
+  - name: local-dev-setup-check
+    path: ./skills/local-dev-setup-check
+  - name: conventions-finder
+    path: ./skills/conventions-finder
+  - name: change-impact-scan
+    path: ./skills/change-impact-scan
+targets:
+  - generic-agent

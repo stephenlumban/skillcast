@@ -1,0 +1,16 @@
+id: org.skillcast.pr-workflow.commit-message
+name: commit-message
+version: 0.1.0
+description: Generates conventional or team-style commit messages
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: staged_changes
+    type: string
+    required: true
+outputs:
+  - name: commit_message
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

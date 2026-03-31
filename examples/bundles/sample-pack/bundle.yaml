@@ -1,0 +1,8 @@
+name: sample-pack
+version: 0.1.0
+description: Describe this bundle
+skills:
+  - name: example-skill
+    path: ./skills/example-skill
+targets:
+  - generic-agent

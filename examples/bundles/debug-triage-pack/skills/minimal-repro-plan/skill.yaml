@@ -1,0 +1,16 @@
+id: org.skillcast.debug-triage.minimal-repro-plan
+name: minimal-repro-plan
+version: 0.1.0
+description: Proposes the smallest reproducible path for a bug
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: issue_context
+    type: string
+    required: true
+outputs:
+  - name: repro_plan
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

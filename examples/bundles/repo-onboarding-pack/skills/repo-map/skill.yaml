@@ -1,0 +1,16 @@
+id: org.skillcast.repo-onboarding.repo-map
+name: repo-map
+version: 0.1.0
+description: Summarizes repo layout, entry points, and boundaries
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: repo_path
+    type: string
+    required: true
+outputs:
+  - name: repo_summary
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

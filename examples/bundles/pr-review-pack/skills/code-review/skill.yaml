@@ -1,0 +1,16 @@
+id: org.core.code-review.basic
+name: code-review
+version: 0.1.0
+description: Reviews code diffs
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: diff
+    type: string
+    required: true
+outputs:
+  - name: review_summary
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

@@ -1,0 +1,16 @@
+id: org.skillcast.pr-workflow.pr-review
+name: pr-review
+version: 0.1.0
+description: Reviews a diff for correctness, clarity, and missing tests
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: diff
+    type: string
+    required: true
+outputs:
+  - name: review_summary
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

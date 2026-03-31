@@ -1,0 +1,16 @@
+id: org.skillcast.repo-onboarding.architecture-explainer
+name: architecture-explainer
+version: 0.1.0
+description: Explains request flow, data flow, and module relationships
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: repo_context
+    type: string
+    required: true
+outputs:
+  - name: architecture_summary
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent

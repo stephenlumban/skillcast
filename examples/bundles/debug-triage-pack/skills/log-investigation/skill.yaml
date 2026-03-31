@@ -1,0 +1,16 @@
+id: org.skillcast.debug-triage.log-investigation
+name: log-investigation
+version: 0.1.0
+description: Analyzes logs and proposes likely causes
+entry:
+  instructions: ./instructions.md
+inputs:
+  - name: logs
+    type: string
+    required: true
+outputs:
+  - name: log_analysis
+    type: string
+compatibility:
+  runtimes:
+    - generic-agent
