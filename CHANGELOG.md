@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Docs
+
+- added `docs/registry-spec.md` to define the spec-first registry, publish, visibility, auth, and reproducibility contract for future platform work
+- added `docs/remote-install-state.md` to define how remote installs extend manifest state and reproducibility without weakening the local lifecycle model
+- added `docs/registry-api.md` to define the minimal registry API contract for resolution, metadata, artifact download, publish, tags, and visibility
+- added `docs/remote-cli-plan.md` to define the phased CLI implementation sequence for manifest v3, parsing, remote inspect, and remote install
+- clarified milestone sequencing so registry definition comes before remote commands or `skillcast login`
+
 ### Local lifecycle
 
 - added `skillcast uninstall <bundle-or-skill>` for bundle and single-skill removal

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "fs-extra";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,9 +12,12 @@ import {
   getPackList,
   inspectBundle,
   installBundle,
+  listBundleSkills,
+  parseRemoteBundleReference,
   repairInstallState,
   uninstallAll,
-  uninstallBundleOrSkill
+  uninstallBundleOrSkill,
+  validateBundle
 } from "../index.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -36,14 +41,15 @@ await run("inspect accepts built-in pack names", async () => {
   assert.ok(payload.installedState);
 });
 
-await run("install built-in pack writes manifest v2 entry and list installed returns it", async () => {
+await run("install built-in pack writes manifest v3 entry and list installed returns it", async () => {
   await withTempRepo(async () => {
     await installBundle("debug-triage-pack");
     const bundles = await getInstalledBundles();
     const manifest = await fs.readJson(path.join(process.cwd(), ".skillcast", "manifest.json"));
 
-    assert.equal(manifest.manifestVersion, 2);
+    assert.equal(manifest.manifestVersion, 3);
     assert.ok(Array.isArray(manifest.bundles[0]?.skills));
+    assert.equal(manifest.bundles[0]?.resolution, undefined);
     assert.ok(bundles.some((bundle) =>
       bundle.bundle === "debug-triage-pack" &&
       bundle.bundleVersion === "0.1.0" &&
@@ -256,6 +262,348 @@ await run("manifest v1 is migrated through lifecycle reads", async () => {
   });
 });
 
+await run("manifest v2 is migrated through lifecycle reads", async () => {
+  await withTempRepo(async () => {
+    await fs.ensureDir(path.join(process.cwd(), ".skillcast", "skills", "legacy-skill"));
+    await fs.writeFile(
+      path.join(process.cwd(), ".skillcast", "skills", "legacy-skill", "SKILL.md"),
+      "# legacy-skill\n\nlegacy\n",
+      "utf8"
+    );
+    await fs.writeJson(path.join(process.cwd(), ".skillcast", "manifest.json"), {
+      manifestVersion: 2,
+      bundles: [
+        {
+          bundle: "legacy-pack",
+          bundleVersion: "0.1.0",
+          source: "./legacy-pack",
+          sourceType: "path",
+          installedSkills: ["legacy-skill"],
+          installedAt: "2026-03-31T00:00:00.000Z",
+          updatedAt: "2026-03-31T00:00:00.000Z",
+          skillDir: ".skillcast/skills",
+          skills: [
+            {
+              id: "legacy.skill",
+              name: "legacy-skill",
+              version: "0.1.0",
+              relativePath: ".skillcast/skills/legacy-skill/SKILL.md",
+              fileHash: "",
+              sourceHash: "",
+              installedAt: "2026-03-31T00:00:00.000Z",
+              updatedAt: "2026-03-31T00:00:00.000Z",
+              ownership: {
+                bundle: "legacy-pack",
+                source: "./legacy-pack",
+                sourceType: "path"
+              }
+            }
+          ]
+        }
+      ]
+    }, { spaces: 2 });
+
+    const bundles = await getInstalledBundles();
+    const manifest = await fs.readJson(path.join(process.cwd(), ".skillcast", "manifest.json"));
+
+    assert.equal(bundles[0]?.bundle, "legacy-pack");
+    assert.equal(manifest.manifestVersion, 2);
+  });
+});
+
+await run("remote bundle references parse into typed selectors", async () => {
+  const floating = parseRemoteBundleReference("skillcast:acme/repo-onboarding");
+  const versioned = parseRemoteBundleReference("skillcast:acme/repo-onboarding@1.4.2");
+  const tagged = parseRemoteBundleReference("skillcast://registry.skillcast.dev/acme/repo-onboarding@stable");
+
+  assert.deepEqual(floating, {
+    raw: "skillcast:acme/repo-onboarding",
+    registry: "default",
+    namespace: "acme",
+    bundle: "repo-onboarding",
+    selector: { mode: "floating" },
+    requestedRef: "skillcast:acme/repo-onboarding"
+  });
+  assert.deepEqual(versioned?.selector, { mode: "version", value: "1.4.2" });
+  assert.equal(tagged?.registry, "registry.skillcast.dev");
+  assert.deepEqual(tagged?.selector, { mode: "tag", value: "stable" });
+  assert.equal(parseRemoteBundleReference("./local-pack"), null);
+});
+
+await run("inspect supports remote bundle references through registry resolution", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: artifact
+  });
+
+  try {
+    const payload = await inspectBundle(`skillcast://${registry.registryHost}/acme/repo-onboarding`);
+
+    assert.equal(payload.name, "remote-pack");
+    assert.equal(payload.version, "1.4.2");
+    assert.equal(payload.source, `skillcast://${registry.registryHost}/acme/repo-onboarding`);
+    assert.equal(payload.resolvedVersion, "1.4.2");
+    assert.ok(typeof payload.resolvedDigest === "string");
+    assert.ok(payload.skills.some((skill) => skill.id === "acme.repo.repo-map"));
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("validate and list skills support remote bundle references", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: artifact
+  });
+
+  try {
+    const ref = `skillcast://${registry.registryHost}/acme/repo-onboarding`;
+    const bundle = await validateBundle(ref);
+    const payload = await listBundleSkills(ref);
+
+    assert.equal(bundle.config.name, "remote-pack");
+    assert.equal(payload.bundle, "remote-pack");
+    assert.ok(payload.skills.some((skill) => skill.id === "acme.repo.repo-map"));
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("inspect rejects remote artifacts with mismatched digest", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: artifact,
+    digest: "sha256:deadbeef"
+  });
+
+  try {
+    await assert.rejects(
+      inspectBundle(`skillcast://${registry.registryHost}/acme/repo-onboarding`),
+      /Digest mismatch/
+    );
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("remote install writes manifest resolution metadata and inspect installed state works", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: artifact
+  });
+
+  try {
+    await withTempRepo(async () => {
+      const ref = `skillcast://${registry.registryHost}/acme/repo-onboarding`;
+      const result = await installBundle(ref);
+      const manifest = await fs.readJson(path.join(process.cwd(), ".skillcast", "manifest.json"));
+      const payload = await inspectBundle(ref, { installed: true });
+
+      assert.equal(result.action, "installed");
+      assert.equal(result.resolvedVersion, "1.4.2");
+      assert.ok(typeof result.resolvedDigest === "string");
+      assert.equal(manifest.manifestVersion, 3);
+      assert.equal(manifest.bundles[0]?.sourceType, "registry");
+      assert.equal(manifest.bundles[0]?.resolution?.requestedRef, ref);
+      assert.equal(manifest.bundles[0]?.resolution?.resolvedVersion, "1.4.2");
+      assert.equal(payload.installedState?.installed, true);
+      assert.equal(payload.installedState?.changedSkills.every((skill) => skill.status === "unchanged"), true);
+    });
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("default registry config resolves skillcast refs without explicit host", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: artifact
+  });
+
+  try {
+    await withTempRepo(async () => {
+      await fs.writeJson(path.join(process.cwd(), "skillcast.config.json"), {
+        defaultRegistry: `http://${registry.registryHost}`
+      }, { spaces: 2 });
+
+      const payload = await inspectBundle("skillcast:acme/repo-onboarding");
+      assert.equal(payload.name, "remote-pack");
+      assert.equal(payload.resolvedVersion, "1.4.2");
+    });
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("remote inspect populates local artifact cache by digest", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const digest = `sha256:${createHash("sha256").update(artifact, "utf8").digest("hex")}`;
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: artifact,
+    digest
+  });
+
+  try {
+    const cachePath = path.join(os.homedir(), ".skillcast", "cache", "artifacts", `${digest.slice("sha256:".length)}.json`);
+    await fs.remove(cachePath);
+    await inspectBundle(`skillcast://${registry.registryHost}/acme/repo-onboarding`);
+    assert.equal(await fs.pathExists(cachePath), true);
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("remote install update refreshes resolved version and diff state", async () => {
+  const initialArtifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.4.2",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Remote instructions"
+  });
+  const updatedArtifact = createRemoteArtifact({
+    bundleName: "remote-pack",
+    bundleVersion: "1.5.0",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Remote onboarding skill",
+    instructions: "Updated remote instructions"
+  });
+  const registry = await startMockRegistry({
+    packageName: "repo-onboarding",
+    version: "1.4.2",
+    artifactBody: initialArtifact
+  });
+
+  try {
+    await withTempRepo(async () => {
+      const ref = `skillcast://${registry.registryHost}/acme/repo-onboarding`;
+      await installBundle(ref);
+
+      registry.update({
+        version: "1.5.0",
+        artifactBody: updatedArtifact
+      });
+
+      const result = await installBundle(ref, { update: true });
+      const manifest = await fs.readJson(path.join(process.cwd(), ".skillcast", "manifest.json"));
+      const installedFile = await fs.readFile(path.join(process.cwd(), ".skillcast", "skills", "repo-map", "SKILL.md"), "utf8");
+      const diff = await diffBundle(ref);
+
+      assert.equal(result.action, "updated");
+      assert.equal(manifest.bundles[0]?.bundleVersion, "1.5.0");
+      assert.equal(manifest.bundles[0]?.resolution?.resolvedVersion, "1.5.0");
+      assert.match(installedFile, /Updated remote instructions/);
+      assert.equal(diff.changes[0]?.status, "unchanged");
+    });
+  } finally {
+    await registry.close();
+  }
+});
+
+await run("registry manifest entries require resolution metadata", async () => {
+  await withTempRepo(async () => {
+    await fs.ensureDir(path.join(process.cwd(), ".skillcast", "skills", "repo-map"));
+    await fs.writeFile(
+      path.join(process.cwd(), ".skillcast", "skills", "repo-map", "SKILL.md"),
+      "# repo-map\n",
+      "utf8"
+    );
+    await fs.writeJson(path.join(process.cwd(), ".skillcast", "manifest.json"), {
+      manifestVersion: 3,
+      bundles: [
+        {
+          bundle: "repo-onboarding",
+          bundleVersion: "1.4.2",
+          source: "skillcast:acme/repo-onboarding",
+          sourceType: "registry",
+          installedSkills: ["repo-map"],
+          installedAt: "2026-03-31T00:00:00.000Z",
+          updatedAt: "2026-03-31T00:00:00.000Z",
+          skillDir: ".skillcast/skills",
+          skills: [
+            {
+              id: "acme.repo.repo-map",
+              name: "repo-map",
+              version: "1.4.2",
+              relativePath: ".skillcast/skills/repo-map/SKILL.md",
+              fileHash: "",
+              sourceHash: "",
+              installedAt: "2026-03-31T00:00:00.000Z",
+              updatedAt: "2026-03-31T00:00:00.000Z",
+              ownership: {
+                bundle: "repo-onboarding",
+                source: "skillcast:acme/repo-onboarding",
+                sourceType: "registry"
+              }
+            }
+          ]
+        }
+      ]
+    }, { spaces: 2 });
+
+    await assert.rejects(
+      getInstalledBundles(),
+      /missing required resolution metadata/
+    );
+  });
+});
+
 await run("uninstall all removes every bundle and cleans the .skillcast directory", async () => {
   await withTempRepo(async () => {
     await installBundle("repo-onboarding-pack");
@@ -387,4 +735,151 @@ async function createBundle(options: {
 
   await fs.writeFile(path.join(skillDir, "instructions.md"), options.instructions, "utf8");
   return rootDir;
+}
+
+function createRemoteArtifact(options: {
+  bundleName: string;
+  bundleVersion: string;
+  skillName: string;
+  skillId: string;
+  description: string;
+  instructions: string;
+}): string {
+  return JSON.stringify({
+    files: [
+      {
+        path: "bundle.yaml",
+        content: [
+          `name: ${options.bundleName}`,
+          `version: ${options.bundleVersion}`,
+          `description: ${options.description}`,
+          "skills:",
+          `  - name: ${options.skillName}`,
+          `    path: ./skills/${options.skillName}`,
+          "targets:",
+          "  - generic-agent",
+          ""
+        ].join("\n")
+      },
+      {
+        path: `skills/${options.skillName}/skill.yaml`,
+        content: [
+          `id: ${options.skillId}`,
+          `name: ${options.skillName}`,
+          `version: ${options.bundleVersion}`,
+          `description: ${options.description}`,
+          "entry:",
+          "  instructions: ./instructions.md",
+          "inputs:",
+          "  - name: input",
+          "    type: string",
+          "    required: true",
+          "outputs:",
+          "  - name: result",
+          "    type: string",
+          "compatibility:",
+          "  runtimes:",
+          "    - generic-agent",
+          ""
+        ].join("\n")
+      },
+      {
+        path: `skills/${options.skillName}/instructions.md`,
+        content: options.instructions
+      }
+    ]
+  });
+}
+
+async function startMockRegistry(options: {
+  packageName: string;
+  version: string;
+  artifactBody: string;
+  digest?: string;
+}): Promise<{
+  registryHost: string;
+  update: (next: { version?: string; artifactBody?: string; digest?: string }) => void;
+  close: () => Promise<void>;
+}> {
+  const state = {
+    version: options.version,
+    artifactBody: options.artifactBody,
+    digest: options.digest ?? `sha256:${createHash("sha256").update(options.artifactBody, "utf8").digest("hex")}`
+  };
+  let registryHost = "";
+
+  const server = http.createServer((req, res) => {
+    if (!req.url) {
+      res.writeHead(500);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (url.pathname === `/v0/resolve/acme/${options.packageName}`) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        resolution: {
+          requestedRef: `skillcast://${registryHost}/acme/${options.packageName}`,
+          mode: "floating",
+          resolvedVersion: state.version,
+          digest: state.digest,
+          package: {
+            registry: registryHost,
+            namespace: "acme",
+            name: options.packageName
+          },
+          resolvedAt: "2026-03-31T00:00:00.000Z",
+          artifactUrl: `http://${registryHost}/artifacts/${options.packageName}`
+        }
+      }));
+      return;
+    }
+
+    if (url.pathname === `/artifacts/${options.packageName}`) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(state.artifactBody);
+      return;
+    }
+
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      error: {
+        code: "not_found",
+        message: "missing route"
+      }
+    }));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.on("error", reject);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Could not determine mock registry address.");
+  }
+
+  registryHost = `127.0.0.1:${address.port}`;
+
+  return {
+    registryHost,
+    update: (next) => {
+      if (next.version) {
+        state.version = next.version;
+      }
+      if (next.artifactBody) {
+        state.artifactBody = next.artifactBody;
+        state.digest = next.digest ?? `sha256:${createHash("sha256").update(next.artifactBody, "utf8").digest("hex")}`;
+      } else if (next.digest) {
+        state.digest = next.digest;
+      }
+    },
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  };
 }

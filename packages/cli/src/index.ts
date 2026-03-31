@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { Command } from "commander";
 import fs from "fs-extra";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -63,8 +64,40 @@ type ValidatedBundle = {
   skills: ValidatedSkill[];
 };
 
-type SourceType = "builtin" | "path";
+type SourceType = "builtin" | "path" | "registry";
 type DiffStatus = "new" | "unchanged" | "source-changed" | "local-modified" | "conflict" | "removed" | "missing";
+
+type RegistrySelector = {
+  mode: "floating" | "tag" | "version";
+  value?: string;
+};
+
+type RegistryPackageIdentity = {
+  registry: string;
+  namespace: string;
+  name: string;
+};
+
+type RegistryResolution = {
+  requestedRef: string;
+  mode: RegistrySelector["mode"];
+  resolvedVersion: string;
+  digest: string;
+  package: RegistryPackageIdentity;
+  resolvedAt: string;
+  artifactUrl?: string;
+  publishedAt?: string;
+  tag?: string;
+  channel?: string;
+};
+
+type RemoteBundleArtifact = {
+  files: Array<{
+    path: string;
+    content: string;
+    encoding?: "utf8" | "base64";
+  }>;
+};
 
 type InstalledSkillEntry = {
   id: string;
@@ -91,6 +124,7 @@ type ManifestEntry = {
   installedAt: string;
   updatedAt: string;
   skillDir: string;
+  resolution?: RegistryResolution;
   skills: InstalledSkillEntry[];
 };
 
@@ -99,11 +133,41 @@ type ManifestData = {
   bundles: ManifestEntry[];
 };
 
-type ResolvedBundleReference = {
+type LocalBundleReference = {
   input: string;
   rootPath: string;
-  referenceType: SourceType;
+  referenceType: "builtin" | "path";
   displaySource: string;
+};
+
+type RegistryBundleReference = {
+  input: string;
+  referenceType: "registry";
+  displaySource: string;
+  requestedRef: string;
+  package: RegistryPackageIdentity;
+  selector: RegistrySelector;
+};
+
+type ResolvedBundleReference = LocalBundleReference | RegistryBundleReference;
+
+type LoadedValidatedBundle = {
+  resolved: ResolvedBundleReference;
+  bundle: ValidatedBundle;
+  registryResolution?: RegistryResolution;
+};
+
+type SkillcastConfig = {
+  defaultRegistry?: string;
+};
+
+export type ParsedRemoteBundleReference = {
+  raw: string;
+  registry: string;
+  namespace: string;
+  bundle: string;
+  selector: RegistrySelector;
+  requestedRef: string;
 };
 
 type CatalogEntry = {
@@ -131,6 +195,8 @@ export type InspectPayload = {
   version: string;
   description: string;
   source: string;
+  resolvedVersion?: string;
+  resolvedDigest?: string;
   targets: string[];
   skills: Array<{
     id: string;
@@ -167,6 +233,8 @@ export type InstallResult = {
   name: string;
   version: string;
   source: string;
+  resolvedVersion?: string;
+  resolvedDigest?: string;
   skillDir: string;
   manifestPath: string;
   changedSkills: string[];
@@ -221,7 +289,7 @@ export type RepairResult = {
   repaired: boolean;
 };
 
-const MANIFEST_VERSION = 2;
+const MANIFEST_VERSION = 3;
 const builtInCatalogSchema = z.object({
   catalogVersion: z.number().int().positive(),
   packs: z.array(z.object({
@@ -246,8 +314,25 @@ const manifestSkillSchema = z.object({
   ownership: z.object({
     bundle: z.string().min(1),
     source: z.string().min(1),
-    sourceType: z.enum(["builtin", "path"]).default("path")
+    sourceType: z.enum(["builtin", "path", "registry"]).default("path")
   })
+});
+
+const registryResolutionSchema = z.object({
+  requestedRef: z.string().min(1),
+  mode: z.enum(["floating", "tag", "version"]),
+  resolvedVersion: z.string().min(1),
+  digest: z.string().min(1),
+  package: z.object({
+    registry: z.string().min(1),
+    namespace: z.string().min(1),
+    name: z.string().min(1)
+  }),
+  resolvedAt: z.string(),
+  artifactUrl: z.string().url().optional(),
+  publishedAt: z.string().optional(),
+  tag: z.string().min(1).optional(),
+  channel: z.string().min(1).optional()
 });
 
 const manifestV1Schema = z.object({
@@ -278,6 +363,22 @@ const manifestV2Schema = z.object({
   }))
 });
 
+const manifestV3Schema = z.object({
+  manifestVersion: z.number().int().positive(),
+  bundles: z.array(z.object({
+    bundle: z.string(),
+    bundleVersion: z.string(),
+    source: z.string(),
+    sourceType: z.enum(["builtin", "path", "registry"]).default("path"),
+    installedSkills: z.array(z.string()).default([]),
+    installedAt: z.string(),
+    updatedAt: z.string(),
+    skillDir: z.string(),
+    resolution: registryResolutionSchema.optional(),
+    skills: z.array(manifestSkillSchema).default([])
+  }))
+});
+
 program
   .name("skillcast")
   .description("CLI for reusable agent skill bundles")
@@ -288,9 +389,10 @@ program
   .argument("<bundleRef>", "path to bundle or built-in pack name")
   .description("Validate a skill bundle")
   .action(async (bundleRef: string) => {
-    const bundle = await validateBundle(bundleRef);
-    console.log(`Bundle ${bundle.config.name}@${bundle.config.version} is valid.`);
-    console.log(`Skills: ${bundle.skills.map((skill) => skill.config.name).join(", ")}`);
+    const payload = await inspectBundle(bundleRef);
+    const suffix = payload.resolvedVersion ? ` (resolved ${payload.resolvedVersion})` : "";
+    console.log(`Bundle ${payload.name}@${payload.version} is valid.${suffix}`);
+    console.log(`Skills: ${payload.skills.map((skill) => skill.name).join(", ")}`);
   });
 
 program
@@ -310,6 +412,12 @@ program
     console.log(`${payload.name}@${payload.version}`);
     console.log(payload.description);
     console.log(`Source: ${payload.source}`);
+    if (payload.resolvedVersion) {
+      console.log(`Resolved Version: ${payload.resolvedVersion}`);
+    }
+    if (payload.resolvedDigest) {
+      console.log(`Resolved Digest: ${payload.resolvedDigest}`);
+    }
     console.log(`Targets: ${payload.targets.join(", ")}`);
     console.log("Skills:");
     for (const skill of payload.skills) {
@@ -386,6 +494,12 @@ program
     console.log(result.summary);
     if (options.verbose) {
       console.log(`Source: ${result.source}`);
+      if (result.resolvedVersion) {
+        console.log(`Resolved Version: ${result.resolvedVersion}`);
+      }
+      if (result.resolvedDigest) {
+        console.log(`Resolved Digest: ${result.resolvedDigest}`);
+      }
       console.log(`Skill Dir: ${result.skillDir}`);
       console.log(`Manifest: ${result.manifestPath}`);
       if (result.changedSkills.length > 0) {
@@ -642,7 +756,19 @@ async function readManifest(manifestPath: string): Promise<ManifestData> {
     };
   }
 
-  const manifest = manifestV2Schema.parse(raw);
+  if (raw?.manifestVersion === 2) {
+    const manifest = manifestV2Schema.parse(raw);
+
+    return {
+      manifestVersion: MANIFEST_VERSION,
+      bundles: sortManifestEntries(manifest.bundles.map((entry) => normalizeManifestEntry({
+        ...entry,
+        source: normalizeSourceDisplay(entry.source, entry.sourceType)
+      })))
+    };
+  }
+
+  const manifest = manifestV3Schema.parse(raw);
 
   return {
     manifestVersion: MANIFEST_VERSION,
@@ -888,7 +1014,35 @@ async function handleListCommand(args: string[]): Promise<void> {
 
 async function resolveAndValidateBundle(bundleRef: string): Promise<ValidatedBundle> {
   const resolved = await resolveBundleReference(bundleRef);
+  assertLocalBundleReference(resolved);
   return validateBundleRoot(resolved.rootPath);
+}
+
+async function withResolvedValidatedBundle<T>(
+  bundleRef: string,
+  task: (loaded: LoadedValidatedBundle) => Promise<T>
+): Promise<T> {
+  const resolved = await resolveBundleReference(bundleRef);
+  if (resolved.referenceType !== "registry") {
+    const bundle = await validateBundleRoot(resolved.rootPath);
+    return task({ resolved, bundle });
+  }
+
+  const registryResolution = await resolveRegistryRelease(resolved);
+  return withMaterializedRemoteBundle(registryResolution, async (bundleRoot) => {
+    const bundle = await validateBundleRoot(bundleRoot);
+    if (bundle.config.version !== registryResolution.resolvedVersion) {
+      throw new Error(
+        `Resolved remote version '${registryResolution.resolvedVersion}' does not match bundle version '${bundle.config.version}' for '${registryResolution.requestedRef}'.`
+      );
+    }
+
+    return task({
+      resolved,
+      bundle,
+      registryResolution
+    });
+  });
 }
 
 async function resolveBundleReference(bundleRef: string): Promise<ResolvedBundleReference> {
@@ -915,9 +1069,283 @@ async function resolveBundleReference(bundleRef: string): Promise<ResolvedBundle
     };
   }
 
+  const remoteRef = parseRemoteBundleReference(bundleRef);
+  if (remoteRef) {
+    return {
+      input: bundleRef,
+      referenceType: "registry",
+      displaySource: remoteRef.requestedRef,
+      requestedRef: remoteRef.requestedRef,
+      package: {
+        registry: remoteRef.registry,
+        namespace: remoteRef.namespace,
+        name: remoteRef.bundle
+      },
+      selector: remoteRef.selector
+    };
+  }
+
   throw new Error(
     `Bundle '${bundleRef}' was not found as a built-in pack or bundle path.`
   );
+}
+
+function assertLocalBundleReference(reference: ResolvedBundleReference): asserts reference is LocalBundleReference {
+  if (reference.referenceType === "registry") {
+    throw new Error(
+      `Remote bundle references are parsed but not implemented yet: ${reference.requestedRef}`
+    );
+  }
+}
+
+function normalizeRegistryResolution(
+  resolution: RegistryResolution | undefined,
+  source: string
+): RegistryResolution {
+  if (!resolution) {
+    throw new Error(`Manifest entry for registry source '${source}' is missing required resolution metadata.`);
+  }
+
+  return {
+    ...resolution,
+    requestedRef: resolution.requestedRef,
+    digest: resolution.digest,
+    package: {
+      registry: resolution.package.registry,
+      namespace: resolution.package.namespace,
+      name: resolution.package.name
+    },
+    artifactUrl: resolution.artifactUrl,
+    publishedAt: resolution.publishedAt,
+    resolvedAt: resolution.resolvedAt,
+    channel: resolution.channel,
+    tag: resolution.mode === "tag" ? resolution.tag : undefined
+  };
+}
+
+export function parseRemoteBundleReference(input: string): ParsedRemoteBundleReference | null {
+  const explicitHostMatch = input.match(/^skillcast:\/\/([^/]+)\/([^/@]+)\/([^/@]+?)(?:@([^/]+))?$/);
+  if (explicitHostMatch) {
+    const [, registry, namespace, bundle, selectorValue] = explicitHostMatch;
+    const selector = parseRegistrySelector(selectorValue);
+    return {
+      raw: input,
+      registry,
+      namespace,
+      bundle,
+      selector,
+      requestedRef: input
+    };
+  }
+
+  const defaultHostMatch = input.match(/^skillcast:([^/@]+)\/([^/@]+?)(?:@([^/]+))?$/);
+  if (defaultHostMatch) {
+    const [, namespace, bundle, selectorValue] = defaultHostMatch;
+    const selector = parseRegistrySelector(selectorValue);
+    return {
+      raw: input,
+      registry: "default",
+      namespace,
+      bundle,
+      selector,
+      requestedRef: input
+    };
+  }
+
+  return null;
+}
+
+function parseRegistrySelector(value: string | undefined): RegistrySelector {
+  if (!value) {
+    return { mode: "floating" };
+  }
+
+  return isExactVersionSelector(value)
+    ? { mode: "version", value }
+    : { mode: "tag", value };
+}
+
+function isExactVersionSelector(value: string): boolean {
+  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value);
+}
+
+async function resolveRegistryRelease(reference: RegistryBundleReference): Promise<RegistryResolution> {
+  const baseUrl = getRegistryBaseUrl(reference.package.registry);
+  const selector = reference.selector.value ? `&value=${encodeURIComponent(reference.selector.value)}` : "";
+  const url = `${baseUrl}/v0/resolve/${encodeURIComponent(reference.package.namespace)}/${encodeURIComponent(reference.package.name)}?mode=${reference.selector.mode}${selector}`;
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(await buildRegistryError(response, reference.requestedRef));
+  }
+
+  const payload = z.object({
+    resolution: registryResolutionSchema
+  }).parse(await response.json());
+
+  if (!payload.resolution.artifactUrl) {
+    throw new Error(`Registry resolution for '${reference.requestedRef}' did not include an artifact URL.`);
+  }
+
+  return normalizeRegistryResolution(payload.resolution, reference.requestedRef);
+}
+
+async function withMaterializedRemoteBundle<T>(
+  resolution: RegistryResolution,
+  task: (bundleRoot: string) => Promise<T>
+): Promise<T> {
+  if (!resolution.artifactUrl) {
+    throw new Error(`Remote resolution for '${resolution.requestedRef}' is missing an artifact URL.`);
+  }
+
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "skillcast-remote-"));
+
+  try {
+    const artifactBuffer = await fetchArtifactBytes(resolution);
+    verifyArtifactDigest(artifactBuffer, resolution.digest, resolution.requestedRef);
+    const artifact = z.object({
+      files: z.array(z.object({
+        path: z.string().min(1),
+        content: z.string(),
+        encoding: z.enum(["utf8", "base64"]).optional()
+      })).min(1)
+    }).parse(JSON.parse(artifactBuffer.toString("utf8"))) as RemoteBundleArtifact;
+
+    await writeArtifactFiles(tempRoot, artifact);
+    return await task(tempRoot);
+  } finally {
+    await fs.remove(tempRoot);
+  }
+}
+
+async function fetchArtifactBytes(resolution: RegistryResolution): Promise<Buffer> {
+  const cachePath = getArtifactCachePath(resolution.digest);
+  if (await fs.pathExists(cachePath)) {
+    return fs.readFile(cachePath);
+  }
+
+  const response = await fetch(resolution.artifactUrl!, {
+    headers: {
+      accept: "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(await buildRegistryError(response, resolution.requestedRef));
+  }
+
+  const artifactBuffer = Buffer.from(await response.arrayBuffer());
+  await fs.ensureDir(path.dirname(cachePath));
+  await fs.writeFile(cachePath, artifactBuffer);
+  return artifactBuffer;
+}
+
+async function writeArtifactFiles(rootPath: string, artifact: RemoteBundleArtifact): Promise<void> {
+  for (const file of artifact.files) {
+    const relativePath = toPosix(file.path);
+    const pathSegments = relativePath.split("/").filter(Boolean);
+    if (relativePath.startsWith("/") || pathSegments.includes("..")) {
+      throw new Error(`Registry artifact contains invalid file path '${file.path}'.`);
+    }
+
+    const targetPath = path.resolve(rootPath, relativePath);
+    if (!isPathWithin(targetPath, rootPath)) {
+      throw new Error(`Registry artifact contains path outside bundle root: '${file.path}'.`);
+    }
+
+    await fs.ensureDir(path.dirname(targetPath));
+    const content = file.encoding === "base64"
+      ? Buffer.from(file.content, "base64")
+      : file.content;
+    await fs.writeFile(targetPath, content);
+  }
+}
+
+function verifyArtifactDigest(bytes: Buffer, digest: string, requestedRef: string): void {
+  const expected = normalizeDigest(digest);
+  const actual = createHash("sha256").update(bytes).digest("hex");
+
+  if (expected !== actual) {
+    throw new Error(`Digest mismatch for remote bundle '${requestedRef}'.`);
+  }
+}
+
+function normalizeDigest(digest: string): string {
+  return digest.startsWith("sha256:") ? digest.slice("sha256:".length) : digest;
+}
+
+function getRegistryBaseUrl(registry: string): string {
+  if (registry === "default") {
+    return process.env.SKILLCAST_REGISTRY_BASE_URL
+      ?? readSkillcastConfigSync().defaultRegistry
+      ?? "https://registry.skillcast.dev";
+  }
+
+  if (registry.startsWith("http://") || registry.startsWith("https://")) {
+    return registry;
+  }
+
+  if (registry.startsWith("localhost:") || registry.startsWith("127.0.0.1:")) {
+    return `http://${registry}`;
+  }
+
+  return `https://${registry}`;
+}
+
+function getArtifactCachePath(digest: string): string {
+  const normalized = normalizeDigest(digest);
+  return path.join(os.homedir(), ".skillcast", "cache", "artifacts", `${normalized}.json`);
+}
+
+function readSkillcastConfigSync(): SkillcastConfig {
+  const candidates = [
+    path.join(process.cwd(), "skillcast.config.json"),
+    path.join(process.cwd(), ".skillcast", "config.json")
+  ];
+
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+
+    const parsed = z.object({
+      defaultRegistry: z.string().min(1).optional()
+    }).safeParse(fs.readJsonSync(candidate));
+    if (parsed.success) {
+      return parsed.data;
+    }
+  }
+
+  return {};
+}
+
+async function buildRegistryError(response: Response, requestedRef: string): Promise<string> {
+  let detail = "";
+
+  try {
+    const payload = await response.json();
+    const parsed = z.object({
+      error: z.object({
+        code: z.string().min(1),
+        message: z.string().min(1).optional()
+      })
+    }).safeParse(payload);
+    if (parsed.success) {
+      detail = parsed.data.error.message
+        ? `${parsed.data.error.code}: ${parsed.data.error.message}`
+        : parsed.data.error.code;
+    }
+  } catch {
+    // Fall back to status text.
+  }
+
+  return detail
+    ? `Registry request failed for '${requestedRef}': ${detail}`
+    : `Registry request failed for '${requestedRef}' with status ${response.status}.`;
 }
 
 function normalizeSourceDisplay(source: string, sourceType: SourceType): string {
@@ -945,6 +1373,9 @@ function normalizeManifestEntry(entry: ManifestEntry): ManifestEntry {
     source: normalizeSourceDisplay(entry.source, entry.sourceType),
     installedSkills: uniqueSkillNames(skills.map((skill) => skill.name)),
     skillDir: toPosix(entry.skillDir),
+    resolution: entry.sourceType === "registry"
+      ? normalizeRegistryResolution(entry.resolution, entry.source)
+      : undefined,
     skills
   };
 }
@@ -1000,48 +1431,52 @@ async function readBuiltInCatalog(searchRoot: string): Promise<CatalogEntry[]> {
 }
 
 export async function validateBundle(bundleRef: string): Promise<ValidatedBundle> {
-  return resolveAndValidateBundle(bundleRef);
+  const loaded = await withResolvedValidatedBundle(bundleRef, async (result) => result);
+  return loaded.bundle;
 }
 
 export async function inspectBundle(bundleRef: string, options: { installed?: boolean } = {}): Promise<InspectPayload> {
-  const resolved = await resolveBundleReference(bundleRef);
-  const bundle = await validateBundleRoot(resolved.rootPath);
-
-  const payload: InspectPayload = {
-    name: bundle.config.name,
-    version: bundle.config.version,
-    description: bundle.config.description,
-    source: resolved.displaySource,
-    targets: bundle.config.targets,
-    skills: bundle.skills.map((skill) => ({
-      id: skill.config.id,
-      name: skill.config.name,
-      version: skill.config.version,
-      description: skill.config.description,
-      path: toPosix(path.relative(bundle.rootPath, skill.directory)),
-      instructions: toPosix(path.relative(bundle.rootPath, skill.instructionsPath)),
-      runtimes: skill.config.compatibility.runtimes,
-      inputs: skill.config.inputs,
-      outputs: skill.config.outputs
-    }))
-  };
-
-  if (options.installed) {
-    const diff = await diffBundle(bundleRef);
-    payload.installedState = {
-      installed: diff.installed,
-      installedAt: diff.installedAt,
-      updatedAt: diff.updatedAt,
-      changedSkills: diff.changes
+  return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle, registryResolution }) => {
+    const payload: InspectPayload = {
+      name: bundle.config.name,
+      version: bundle.config.version,
+      description: bundle.config.description,
+      source: resolved.displaySource,
+      resolvedVersion: registryResolution?.resolvedVersion,
+      resolvedDigest: registryResolution?.digest,
+      targets: bundle.config.targets,
+      skills: bundle.skills.map((skill) => ({
+        id: skill.config.id,
+        name: skill.config.name,
+        version: skill.config.version,
+        description: skill.config.description,
+        path: toPosix(path.relative(bundle.rootPath, skill.directory)),
+        instructions: toPosix(path.relative(bundle.rootPath, skill.instructionsPath)),
+        runtimes: skill.config.compatibility.runtimes,
+        inputs: skill.config.inputs,
+        outputs: skill.config.outputs
+      }))
     };
-  }
 
-  return payload;
+    if (options.installed) {
+      const diff = await diffBundle(bundleRef);
+      payload.installedState = {
+        installed: diff.installed,
+        installedAt: diff.installedAt,
+        updatedAt: diff.updatedAt,
+        changedSkills: diff.changes
+      };
+    }
+
+    return payload;
+  });
 }
 
 export async function diffBundle(bundleRef: string): Promise<DiffPayload> {
-  const resolved = await resolveBundleReference(bundleRef);
-  const bundle = await validateBundleRoot(resolved.rootPath);
+  return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle }) => diffValidatedBundle(bundle, resolved));
+}
+
+async function diffValidatedBundle(bundle: ValidatedBundle, resolved: ResolvedBundleReference): Promise<DiffPayload> {
   const repoRoot = process.cwd();
   const installedSkillsDir = path.join(repoRoot, ".skillcast", "skills");
   const manifest = await readManifest(path.join(repoRoot, ".skillcast", "manifest.json"));
@@ -1139,12 +1574,23 @@ export async function diffBundle(bundleRef: string): Promise<DiffPayload> {
 }
 
 export async function installBundle(bundleRef: string, options: InstallOptions = {}): Promise<InstallResult> {
-  return withSkillcastLock(process.cwd(), async () => installBundleUnlocked(bundleRef, options));
+  return withResolvedValidatedBundle(bundleRef, async (loaded) =>
+    withSkillcastLock(process.cwd(), async () => installLoadedBundleUnlocked(loaded, options))
+  );
 }
 
 async function installBundleUnlocked(bundleRef: string, options: InstallOptions = {}): Promise<InstallResult> {
   const resolved = await resolveBundleReference(bundleRef);
+  assertLocalBundleReference(resolved);
   const bundle = await validateBundleRoot(resolved.rootPath);
+  return installLoadedBundleUnlocked({ resolved, bundle }, options);
+}
+
+async function installLoadedBundleUnlocked(
+  loaded: LoadedValidatedBundle,
+  options: InstallOptions = {}
+): Promise<InstallResult> {
+  const { resolved, bundle, registryResolution } = loaded;
   const repoRoot = process.cwd();
   const skillcastDir = path.join(repoRoot, ".skillcast");
   const installedSkillsDir = path.join(skillcastDir, "skills");
@@ -1159,7 +1605,7 @@ async function installBundleUnlocked(bundleRef: string, options: InstallOptions 
   const overwrittenOwners = new Map<string, { bundle: ManifestEntry; skill: InstalledSkillEntry }>();
 
   if (existingBundle && !options.update) {
-    throw new Error(`Bundle '${bundle.config.name}' is already installed. Use 'skillcast install ${bundleRef} --update' to refresh it.`);
+    throw new Error(`Bundle '${bundle.config.name}' is already installed. Use 'skillcast install ${resolved.displaySource} --update' to refresh it.`);
   }
 
   if (!existingBundle && options.update) {
@@ -1290,6 +1736,10 @@ async function installBundleUnlocked(bundleRef: string, options: InstallOptions 
       installedAt: existingBundle?.installedAt ?? now,
       updatedAt: now,
       skillDir: toPosix(path.relative(repoRoot, installedSkillsDir)),
+      resolution: resolved.referenceType === "registry" ? {
+        ...registryResolution!,
+        resolvedAt: registryResolution?.resolvedAt ?? now
+      } : undefined,
       skills: desiredRecords
     });
 
@@ -1309,6 +1759,8 @@ async function installBundleUnlocked(bundleRef: string, options: InstallOptions 
     name: bundle.config.name,
     version: bundle.config.version,
     source: resolved.displaySource,
+    resolvedVersion: registryResolution?.resolvedVersion,
+    resolvedDigest: registryResolution?.digest,
     skillDir: toPosix(path.relative(repoRoot, installedSkillsDir)),
     manifestPath: toPosix(path.relative(repoRoot, manifestPath)),
     changedSkills: uniqueSkillNames(changedSkills),
@@ -1492,9 +1944,7 @@ export async function listBundleSkills(bundleRef: string): Promise<{
     path: string;
   }>;
 }> {
-  const resolved = await resolveBundleReference(bundleRef);
-  const bundle = await validateBundleRoot(resolved.rootPath);
-  return {
+  return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle }) => ({
     bundle: bundle.config.name,
     version: bundle.config.version,
     source: resolved.displaySource,
@@ -1505,7 +1955,7 @@ export async function listBundleSkills(bundleRef: string): Promise<{
       description: skill.config.description,
       path: toPosix(path.relative(bundle.rootPath, skill.directory))
     }))
-  };
+  }));
 }
 
 export async function getInstalledBundles(): Promise<InstalledListItem[]> {

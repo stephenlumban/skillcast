@@ -65,6 +65,17 @@ The local lifecycle is now versioned and safe to evolve:
 - update and uninstall flows detect locally modified installed files
 - collisions warn by default and require `--force` for explicit overwrite paths
 
+## Platform Boundary
+
+The next phase is registry and publish-contract definition, not new platform commands.
+
+- remote distribution semantics are defined in `docs/registry-spec.md`
+- remote provenance and manifest evolution are defined in `docs/remote-install-state.md`
+- registry read/write transport expectations are defined in `docs/registry-api.md`
+- CLI sequencing for remote work is defined in `docs/remote-cli-plan.md`
+- local lifecycle safety remains the baseline for any future remote install flow
+- `skillcast login` stays out of scope until authenticated remote registry behavior actually exists
+
 ## Example Bundles
 
 - `pr-review-pack`: minimal v0 example from the original handover
@@ -88,4 +99,4 @@ node packages/cli/dist/index.js diff pr-workflow-pack
 node packages/cli/dist/index.js list installed
 ```
 
-See [Lifecycle Milestones](./docs/milestones.md) for the current implementation boundary and future platform milestones.
+See [Lifecycle Milestones](./docs/milestones.md) for the current implementation boundary and [Registry Spec](./docs/registry-spec.md) for the next platform-facing contract.
