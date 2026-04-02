@@ -18,8 +18,8 @@ skillcast uninstall <bundle-or-skill> --dry-run
 skillcast uninstall --all
 skillcast repair [--write]
 skillcast init [path]
-skillcast publish <bundle-path-or-pack-name> [--store-path <path>] [--dry-run] [--verbose]
-skillcast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-path <path>] [--dry-run]
+skillcast publish <bundle-path-or-pack-name> [--store-url <url>] [--region <region>] [--dry-run] [--verbose]
+skillcast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-url <url>] [--region <region>] [--dry-run]
 ```
 
 Alias support is shipped through the same CLI binary:
@@ -37,8 +37,8 @@ cast uninstall <bundle-or-skill>
 cast uninstall <bundle-or-skill> --dry-run
 cast uninstall --all
 cast repair [--write]
-cast publish <bundle-path-or-pack-name> [--store-path <path>] [--dry-run] [--verbose]
-cast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-path <path>] [--dry-run]
+cast publish <bundle-path-or-pack-name> [--store-url <url>] [--region <region>] [--dry-run] [--verbose]
+cast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-url <url>] [--region <region>] [--dry-run]
 ```
 
 ## Project Layout
@@ -171,7 +171,7 @@ The intended workflow is:
 
 1. a human authors a bundle locally
 2. `skillcast validate` confirms the folder is a real bundle
-3. `skillcast publish` copies that validated bundle into the cloud/store layout
+3. `skillcast publish` uploads that validated bundle directly into the S3-backed store
 
 ### 1. Create A Bundle
 
@@ -209,7 +209,7 @@ skillcast validate ./my-bundle
 skillcast inspect ./my-bundle
 ```
 
-Publish uses the same validation path internally, so an invalid folder will fail before any store files are written.
+Publish uses the same validation path internally, so an invalid folder will fail before any S3 objects are written.
 
 Validation checks include:
 
@@ -222,51 +222,53 @@ Validation checks include:
 - skill ids are unique
 - skill names are unique
 
-### 3. Configure A Store Target
+### 3. Configure An S3 Store Target
 
-For local or CI publishing into a filesystem-backed store, either pass the target path explicitly:
-
-```bash
-skillcast publish ./my-bundle --store-path ./bundle-store
-```
-
-or configure a default publish path in `skillcast.config.json`:
+Point Skillcast at the hosted S3 store URL in `skillcast.config.json`:
 
 ```json
 {
-  "defaultBundleStorePublishPath": "./bundle-store",
   "defaultBundleStoreUrl": "https://my-team-bundles.s3.ap-southeast-1.amazonaws.com"
 }
 ```
 
-`defaultBundleStorePublishPath` is the local directory the CLI writes to.
-`defaultBundleStoreUrl` is the remote URL other clients read from.
+Or pass the S3 store URL explicitly per command:
 
-Typical deployment flow:
+```bash
+skillcast publish ./my-bundle --store-url https://my-team-bundles.s3.ap-southeast-1.amazonaws.com
+```
 
-1. publish locally into a store folder
-2. sync that folder to S3 or your static host
-3. consumers install from the hosted `defaultBundleStoreUrl`
+If Skillcast cannot infer the AWS region from the URL, pass it explicitly:
+
+```bash
+skillcast publish ./my-bundle --store-url https://my-team-bundles.s3.amazonaws.com --region ap-southeast-1
+```
+
+`defaultBundleStoreUrl` is both:
+
+- the remote URL other clients install from
+- the default S3 publish target for `skillcast publish`
 
 ### 4. Publish
 
 Publish the validated bundle:
 
 ```bash
-skillcast publish ./my-bundle --store-path ./bundle-store
+skillcast publish ./my-bundle
+skillcast publish ./my-bundle --store-url https://my-team-bundles.s3.ap-southeast-1.amazonaws.com
 ```
 
 What publish does:
 
 - validates the bundle
 - rejects duplicate `<name>@<version>` publishes
-- writes `bundles/<name>/<version>/...`
-- updates `catalog.json` atomically
+- uploads `bundles/<name>/<version>/...` to S3
+- updates `catalog.json` in S3
 
 Preview without writing:
 
 ```bash
-skillcast publish ./my-bundle --store-path ./bundle-store --dry-run
+skillcast publish ./my-bundle --dry-run
 ```
 
 ### 5. Unpublish
@@ -274,8 +276,9 @@ skillcast publish ./my-bundle --store-path ./bundle-store --dry-run
 Remove a published version:
 
 ```bash
-skillcast unpublish ./my-bundle --store-path ./bundle-store
-skillcast unpublish my-bundle@0.1.0 --store-path ./bundle-store
+skillcast unpublish ./my-bundle
+skillcast unpublish my-bundle@0.1.0
+skillcast unpublish my-bundle@0.1.0 --store-url https://my-team-bundles.s3.ap-southeast-1.amazonaws.com
 ```
 
 If the removed version is the last remaining version for that bundle, the CLI also removes the bundle entry from `catalog.json`.
@@ -283,7 +286,7 @@ If the removed version is the last remaining version for that bundle, the CLI al
 Preview without writing:
 
 ```bash
-skillcast unpublish my-bundle@0.1.0 --store-path ./bundle-store --dry-run
+skillcast unpublish my-bundle@0.1.0 --dry-run
 ```
 
 ## Example Bundles

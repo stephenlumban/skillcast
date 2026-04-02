@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { Command } from "commander";
+import {
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3";
 import fs from "fs-extra";
 import os from "node:os";
 import path from "node:path";
@@ -175,7 +183,6 @@ type LoadedValidatedBundle = {
 type SkillcastConfig = {
   defaultRegistry?: string;
   defaultBundleStoreUrl?: string;
-  defaultBundleStorePublishPath?: string;
 };
 
 type CatalogEntry = {
@@ -262,7 +269,7 @@ export type InstallResult = {
 export type PublishResult = {
   name: string;
   version: string;
-  storePath: string;
+  storeUrl: string;
   bundlePath: string;
   catalogPath: string;
   publishedFiles: string[];
@@ -273,7 +280,7 @@ export type PublishResult = {
 export type UnpublishResult = {
   name: string;
   version: string;
-  storePath: string;
+  storeUrl: string;
   bundlePath: string;
   catalogPath: string;
   removedBundle: boolean;
@@ -328,14 +335,31 @@ type UninstallOptions = {
 };
 
 type PublishOptions = {
-  storePath?: string;
+  storeUrl?: string;
+  region?: string;
   dryRun?: boolean;
 };
 
 type UnpublishOptions = {
-  storePath?: string;
+  storeUrl?: string;
+  region?: string;
   version?: string;
   dryRun?: boolean;
+};
+
+type S3StoreTarget = {
+  baseUrl: string;
+  bucket: string;
+  prefix: string;
+  region: string;
+};
+
+type BundleStoreClient = {
+  getText: (key: string) => Promise<string | null>;
+  putText: (key: string, content: string, contentType: string) => Promise<void>;
+  exists: (key: string) => Promise<boolean>;
+  listKeys: (prefix: string) => Promise<string[]>;
+  deleteKeys: (keys: string[]) => Promise<void>;
 };
 
 export type RepairResult = {
@@ -581,15 +605,16 @@ program
 program
   .command("publish")
   .argument("<bundleRef>", "path to bundle or built-in pack name")
-  .option("--store-path <path>", "bundle store root directory to publish into")
+  .option("--store-url <url>", "S3-backed bundle store base URL to publish into")
+  .option("--region <region>", "AWS region override for the S3 bucket")
   .option("--dry-run", "report publish changes without writing files")
   .option("--verbose", "show detailed publish output")
-  .description("Publish a bundle into a filesystem-backed bundle store")
+  .description("Publish a bundle directly into an S3-backed bundle store")
   .action(async (bundleRef: string, options: PublishOptions & { verbose?: boolean }) => {
     const result = await publishBundle(bundleRef, options);
     console.log(result.summary);
     if (options.verbose) {
-      console.log(`Store Path: ${result.storePath}`);
+      console.log(`Store URL: ${result.storeUrl}`);
       console.log(`Bundle Path: ${result.bundlePath}`);
       console.log(`Catalog: ${result.catalogPath}`);
       console.log(`Published Files: ${result.publishedFiles.join(", ")}`);
@@ -600,9 +625,10 @@ program
   .command("unpublish")
   .argument("<bundleRefOrName>", "local bundle path, built-in pack name, or bundle name")
   .option("--version <version>", "exact bundle version to remove when passing a bundle name")
-  .option("--store-path <path>", "bundle store root directory to remove from")
+  .option("--store-url <url>", "S3-backed bundle store base URL to remove from")
+  .option("--region <region>", "AWS region override for the S3 bucket")
   .option("--dry-run", "report unpublish changes without writing files")
-  .description("Remove a published bundle version from a filesystem-backed bundle store")
+  .description("Remove a published bundle version from an S3-backed bundle store")
   .action(async (bundleRefOrName: string, options: UnpublishOptions) => {
     const result = await unpublishBundle(bundleRefOrName, options);
     console.log(result.summary);
@@ -1708,6 +1734,97 @@ function getDefaultBundleStoreBaseUrl(): string | undefined {
   );
 }
 
+let bundleStoreClientFactory: ((target: S3StoreTarget) => BundleStoreClient | Promise<BundleStoreClient>) | null = null;
+
+export function setBundleStoreClientFactoryForTests(
+  factory: ((target: S3StoreTarget) => BundleStoreClient | Promise<BundleStoreClient>) | null
+): void {
+  bundleStoreClientFactory = factory;
+}
+
+async function createBundleStoreClient(target: S3StoreTarget): Promise<BundleStoreClient> {
+  if (bundleStoreClientFactory) {
+    return bundleStoreClientFactory(target);
+  }
+
+  const client = new S3Client({ region: target.region });
+
+  return {
+    getText: async (key) => {
+      try {
+        const response = await client.send(new GetObjectCommand({
+          Bucket: target.bucket,
+          Key: key
+        }));
+        return response.Body ? await response.Body.transformToString() : "";
+      } catch (error) {
+        if (isS3NotFoundError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    putText: async (key, content, contentType) => {
+      await client.send(new PutObjectCommand({
+        Bucket: target.bucket,
+        Key: key,
+        Body: content,
+        ContentType: contentType
+      }));
+    },
+    exists: async (key) => {
+      try {
+        await client.send(new HeadObjectCommand({
+          Bucket: target.bucket,
+          Key: key
+        }));
+        return true;
+      } catch (error) {
+        if (isS3NotFoundError(error)) {
+          return false;
+        }
+        throw error;
+      }
+    },
+    listKeys: async (prefix) => {
+      const keys: string[] = [];
+      let continuationToken: string | undefined;
+
+      do {
+        const response = await client.send(new ListObjectsV2Command({
+          Bucket: target.bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken
+        }));
+        for (const item of response.Contents ?? []) {
+          if (item.Key) {
+            keys.push(item.Key);
+          }
+        }
+        continuationToken = response.NextContinuationToken;
+      } while (continuationToken);
+
+      return keys;
+    },
+    deleteKeys: async (keys) => {
+      if (keys.length === 0) {
+        return;
+      }
+
+      for (let index = 0; index < keys.length; index += 1000) {
+        const batch = keys.slice(index, index + 1000);
+        await client.send(new DeleteObjectsCommand({
+          Bucket: target.bucket,
+          Delete: {
+            Objects: batch.map((key) => ({ Key: key })),
+            Quiet: true
+          }
+        }));
+      }
+    }
+  };
+}
+
 function normalizeConfiguredBaseUrl(value: string | undefined): string | undefined {
   if (!value) {
     return undefined;
@@ -1734,8 +1851,7 @@ function readSkillcastConfigSync(): SkillcastConfig {
 
     const parsed = z.object({
       defaultRegistry: z.string().min(1).optional(),
-      defaultBundleStoreUrl: z.string().min(1).optional(),
-      defaultBundleStorePublishPath: z.string().min(1).optional()
+      defaultBundleStoreUrl: z.string().min(1).optional()
     }).safeParse(fs.readJsonSync(candidate));
     if (parsed.success) {
       return parsed.data;
@@ -2054,87 +2170,114 @@ export async function installBundle(bundleRef: string, options: InstallOptions =
 export async function publishBundle(bundleRef: string, options: PublishOptions = {}): Promise<PublishResult> {
   return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle }) => {
     assertLocalBundleReference(resolved);
-    const storePath = resolveBundleStorePublishPath(options.storePath);
-    const versionRoot = path.join(storePath, "bundles", bundle.config.name, bundle.config.version);
-    const catalogPath = path.join(storePath, "catalog.json");
-    const publishedFiles = await collectPublishFileList(bundle);
+    const target = resolveS3StoreTarget(options.storeUrl, options.region);
+    const client = await createBundleStoreClient(target);
+    const bundleRootKey = buildStoreBundleVersionKeyPrefix(bundle.config.name, bundle.config.version, target.prefix);
+    const bundleYamlKey = `${bundleRootKey}/bundle.yaml`;
+    const catalogKey = buildStoreCatalogKey(target.prefix);
+    const publishedFiles = await collectPublishBundleFiles(bundle);
 
-    return withStoreLock(storePath, async () => {
-      const existingCatalog = await readStoreCatalogFile(catalogPath);
-      const existingBundle = existingCatalog.find((entry) => entry.name === bundle.config.name);
-      if (existingBundle?.versions.includes(bundle.config.version) || await fs.pathExists(versionRoot)) {
-        throw new Error(
-          `Bundle '${bundle.config.name}@${bundle.config.version}' already exists in the bundle store at ${toDisplayPath(storePath)}.`
-        );
-      }
-
-      if (!options.dryRun) {
-        await writeBundleVersionToStore(bundle, versionRoot);
-        await writeStoreCatalogFile(catalogPath, updateStoreCatalog(existingCatalog, bundle));
-      }
-
-      return {
-        name: bundle.config.name,
-        version: bundle.config.version,
-        storePath: toPosix(storePath),
-        bundlePath: toPosix(path.relative(storePath, versionRoot)),
-        catalogPath: toPosix(path.relative(storePath, catalogPath)),
-        publishedFiles,
-        dryRun: Boolean(options.dryRun),
-        summary: options.dryRun
-          ? `Dry run: would publish ${bundle.config.name}@${bundle.config.version} to ${toDisplayPath(storePath)}.`
-          : `Published ${bundle.config.name}@${bundle.config.version} to ${toDisplayPath(storePath)}.`
-      };
-    });
-  });
-}
-
-export async function unpublishBundle(bundleRefOrName: string, options: UnpublishOptions = {}): Promise<UnpublishResult> {
-  const target = await resolveUnpublishTarget(bundleRefOrName, options.version);
-  const storePath = resolveBundleStorePublishPath(options.storePath);
-  const versionRoot = path.join(storePath, "bundles", target.name, target.version);
-  const catalogPath = path.join(storePath, "catalog.json");
-
-  return withStoreLock(storePath, async () => {
-    const existingCatalog = await readStoreCatalogFile(catalogPath);
-    const existingBundle = existingCatalog.find((entry) => entry.name === target.name);
-    if (!existingBundle || !existingBundle.versions.includes(target.version) || !(await fs.pathExists(versionRoot))) {
+    const existingCatalog = await readStoreCatalogFromClient(client, catalogKey);
+    const existingBundle = existingCatalog.find((entry) => entry.name === bundle.config.name);
+    if (existingBundle?.versions.includes(bundle.config.version) || await client.exists(bundleYamlKey)) {
       throw new Error(
-        `Bundle '${target.name}@${target.version}' was not found in the bundle store at ${toDisplayPath(storePath)}.`
+        `Bundle '${bundle.config.name}@${bundle.config.version}' already exists in the bundle store at ${target.baseUrl}.`
       );
     }
 
-    const nextCatalog = removeStoreCatalogVersion(existingCatalog, target.name, target.version);
     if (!options.dryRun) {
-      await fs.remove(versionRoot);
-      const bundleRoot = path.dirname(versionRoot);
-      if (await fs.pathExists(bundleRoot)) {
-        const remainingEntries = await fs.readdir(bundleRoot);
-        if (remainingEntries.length === 0) {
-          await fs.remove(bundleRoot);
-        }
+      for (const file of publishedFiles) {
+        await client.putText(
+          `${bundleRootKey}/${file.path}`,
+          file.content,
+          file.path.endsWith(".md")
+            ? "text/markdown; charset=utf-8"
+            : file.path.endsWith(".yaml")
+              ? "text/yaml; charset=utf-8"
+              : "text/plain; charset=utf-8"
+        );
       }
-
-      if (nextCatalog.length === 0) {
-        await fs.remove(catalogPath);
-      } else {
-        await writeStoreCatalogFile(catalogPath, nextCatalog);
-      }
+      await writeStoreCatalogToClient(client, catalogKey, updateStoreCatalog(existingCatalog, bundle));
     }
 
     return {
-      name: target.name,
-      version: target.version,
-      storePath: toPosix(storePath),
-      bundlePath: toPosix(path.relative(storePath, versionRoot)),
-      catalogPath: toPosix(path.relative(storePath, catalogPath)),
-      removedBundle: !nextCatalog.some((entry) => entry.name === target.name),
+      name: bundle.config.name,
+      version: bundle.config.version,
+      storeUrl: target.baseUrl,
+      bundlePath: toPosix(bundleRootKey),
+      catalogPath: toPosix(catalogKey),
+      publishedFiles: publishedFiles.map((file) => file.path),
       dryRun: Boolean(options.dryRun),
       summary: options.dryRun
-        ? `Dry run: would unpublish ${target.name}@${target.version} from ${toDisplayPath(storePath)}.`
-        : `Unpublished ${target.name}@${target.version} from ${toDisplayPath(storePath)}.`
+        ? `Dry run: would publish ${bundle.config.name}@${bundle.config.version} to ${target.baseUrl}.`
+        : `Published ${bundle.config.name}@${bundle.config.version} to ${target.baseUrl}.`
     };
   });
+}
+
+function buildStoreCatalogKey(prefix: string): string {
+  return prefix ? `${prefix}/catalog.json` : "catalog.json";
+}
+
+function buildStoreBundleVersionKeyPrefix(bundleName: string, version: string, prefix: string): string {
+  const relative = toPosix(path.posix.join("bundles", bundleName, version));
+  return prefix ? `${prefix}/${relative}` : relative;
+}
+
+function isS3NotFoundError(error: unknown): boolean {
+  return error instanceof Error && (
+    "name" in error && (error as Error & { name?: string }).name === "NotFound"
+    || "Code" in (error as object) && (error as { Code?: string }).Code === "NotFound"
+    || "Code" in (error as object) && (error as { Code?: string }).Code === "NoSuchKey"
+    || "$metadata" in (error as object) && (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404
+  );
+}
+
+export async function unpublishBundle(bundleRefOrName: string, options: UnpublishOptions = {}): Promise<UnpublishResult> {
+  const targetBundle = await resolveUnpublishTarget(bundleRefOrName, options.version);
+  const target = resolveS3StoreTarget(options.storeUrl, options.region);
+  const client = await createBundleStoreClient(target);
+  const versionPrefix = buildStoreBundleVersionKeyPrefix(targetBundle.name, targetBundle.version, target.prefix);
+  const bundleYamlKey = `${versionPrefix}/bundle.yaml`;
+  const catalogKey = buildStoreCatalogKey(target.prefix);
+
+  const existingCatalog = await readStoreCatalogFromClient(client, catalogKey);
+  const existingBundle = existingCatalog.find((entry) => entry.name === targetBundle.name);
+  if (!existingBundle || !existingBundle.versions.includes(targetBundle.version) || !(await client.exists(bundleYamlKey))) {
+    throw new Error(
+      `Bundle '${targetBundle.name}@${targetBundle.version}' was not found in the bundle store at ${target.baseUrl}.`
+    );
+  }
+
+  const nextCatalog = removeStoreCatalogVersion(existingCatalog, targetBundle.name, targetBundle.version);
+  const objectKeys = await client.listKeys(`${versionPrefix}/`);
+
+  if (!options.dryRun) {
+    if (objectKeys.length > 0) {
+      await client.deleteKeys(objectKeys);
+    }
+
+    if (nextCatalog.length === 0) {
+      if (await client.exists(catalogKey)) {
+        await client.deleteKeys([catalogKey]);
+      }
+    } else {
+      await writeStoreCatalogToClient(client, catalogKey, nextCatalog);
+    }
+  }
+
+  return {
+    name: targetBundle.name,
+    version: targetBundle.version,
+    storeUrl: target.baseUrl,
+    bundlePath: toPosix(versionPrefix),
+    catalogPath: toPosix(catalogKey),
+    removedBundle: !nextCatalog.some((entry) => entry.name === targetBundle.name),
+    dryRun: Boolean(options.dryRun),
+    summary: options.dryRun
+      ? `Dry run: would unpublish ${targetBundle.name}@${targetBundle.version} from ${target.baseUrl}.`
+      : `Unpublished ${targetBundle.name}@${targetBundle.version} from ${target.baseUrl}.`
+  };
 }
 
 async function installBundleUnlocked(bundleRef: string, options: InstallOptions = {}): Promise<InstallResult> {
@@ -2328,13 +2471,41 @@ async function installLoadedBundleUnlocked(
   };
 }
 
-function resolveBundleStorePublishPath(explicitPath?: string): string {
-  const configuredPath = explicitPath ?? readSkillcastConfigSync().defaultBundleStorePublishPath;
-  if (!configuredPath) {
-    throw new Error("Missing bundle store publish path. Pass '--store-path <path>' or set 'defaultBundleStorePublishPath' in skillcast.config.json.");
+function resolveS3StoreTarget(explicitUrl?: string, explicitRegion?: string): S3StoreTarget {
+  const baseUrl = normalizeConfiguredBaseUrl(explicitUrl ?? readSkillcastConfigSync().defaultBundleStoreUrl);
+  if (!baseUrl) {
+    throw new Error("Missing bundle store URL. Pass '--store-url <url>' or set 'defaultBundleStoreUrl' in skillcast.config.json.");
   }
 
-  return path.resolve(process.cwd(), configuredPath);
+  const parsed = new URL(baseUrl);
+  const match = parsed.hostname.match(/^(.+)\.s3[.-]([a-z0-9-]+)\.amazonaws\.com$/i)
+    ?? parsed.hostname.match(/^(.+)\.s3\.amazonaws\.com$/i);
+  if (!match) {
+    if (bundleStoreClientFactory && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")) {
+      return {
+        baseUrl,
+        bucket: parsed.hostname,
+        prefix: parsed.pathname.replace(/^\/+|\/+$/g, ""),
+        region: explicitRegion ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-east-1"
+      };
+    }
+
+    throw new Error(`Bundle store URL must target an S3 bucket host: ${baseUrl}`);
+  }
+
+  const bucket = match[1];
+  const inferredRegion = match[2];
+  const region = explicitRegion ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? inferredRegion;
+  if (!region) {
+    throw new Error(`Could not determine AWS region for bundle store URL '${baseUrl}'. Pass '--region <region>' or set AWS_REGION.`);
+  }
+
+  return {
+    baseUrl,
+    bucket,
+    prefix: parsed.pathname.replace(/^\/+|\/+$/g, ""),
+    region
+  };
 }
 
 async function resolveUnpublishTarget(input: string, explicitVersion?: string): Promise<{ name: string; version: string }> {
@@ -2376,47 +2547,25 @@ async function resolveUnpublishTarget(input: string, explicitVersion?: string): 
   throw new Error("Unpublish requires either a local bundle reference or an exact '<bundle>@<version>' target.");
 }
 
-async function collectPublishFileList(bundle: ValidatedBundle): Promise<string[]> {
-  const publishedFiles = new Set<string>(["bundle.yaml"]);
+async function collectPublishBundleFiles(bundle: ValidatedBundle): Promise<Array<{ path: string; content: string }>> {
+  const publishedFiles = new Map<string, string>();
+  publishedFiles.set("bundle.yaml", await fs.readFile(bundle.bundlePath, "utf8"));
 
   for (const skill of bundle.skills) {
     const skillYamlPath = path.join(skill.directory, "skill.yaml");
-    publishedFiles.add(toPosix(path.relative(bundle.rootPath, skillYamlPath)));
-    publishedFiles.add(toPosix(path.relative(bundle.rootPath, skill.instructionsPath)));
+    publishedFiles.set(
+      toPosix(path.relative(bundle.rootPath, skillYamlPath)),
+      await fs.readFile(skillYamlPath, "utf8")
+    );
+    publishedFiles.set(
+      toPosix(path.relative(bundle.rootPath, skill.instructionsPath)),
+      await fs.readFile(skill.instructionsPath, "utf8")
+    );
   }
 
-  return [...publishedFiles].sort((left, right) => left.localeCompare(right));
-}
-
-async function writeBundleVersionToStore(bundle: ValidatedBundle, versionRoot: string): Promise<void> {
-  const tmpVersionRoot = `${versionRoot}.${process.pid}.${Date.now()}.tmp`;
-  const publishedFiles = await collectPublishFileList(bundle);
-
-  await fs.remove(tmpVersionRoot);
-  await fs.ensureDir(tmpVersionRoot);
-
-  for (const relativePath of publishedFiles) {
-    const sourcePath = path.resolve(bundle.rootPath, relativePath);
-    const targetPath = path.resolve(tmpVersionRoot, relativePath);
-
-    if (!isPathWithin(targetPath, tmpVersionRoot)) {
-      throw new Error(`Refusing to publish outside the bundle store root: ${relativePath}`);
-    }
-
-    await fs.ensureDir(path.dirname(targetPath));
-    await fs.copyFile(sourcePath, targetPath);
-  }
-
-  await fs.move(tmpVersionRoot, versionRoot, { overwrite: false });
-}
-
-async function readStoreCatalogFile(catalogPath: string): Promise<RemoteStoreCatalogEntry[]> {
-  if (!(await fs.pathExists(catalogPath))) {
-    return [];
-  }
-
-  const catalog = remoteStoreCatalogSchema.parse(await fs.readJson(catalogPath));
-  return catalog.bundles;
+  return [...publishedFiles.entries()]
+    .map(([filePath, content]) => ({ path: filePath, content }))
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function updateStoreCatalog(existing: RemoteStoreCatalogEntry[], bundle: ValidatedBundle): RemoteStoreCatalogEntry[] {
@@ -2472,11 +2621,21 @@ function removeStoreCatalogVersion(existing: RemoteStoreCatalogEntry[], bundleNa
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-async function writeStoreCatalogFile(catalogPath: string, bundles: RemoteStoreCatalogEntry[]): Promise<void> {
-  await writeJsonFileAtomic(catalogPath, {
+async function writeStoreCatalogToClient(client: BundleStoreClient, catalogKey: string, bundles: RemoteStoreCatalogEntry[]): Promise<void> {
+  await client.putText(catalogKey, `${JSON.stringify({
     catalogVersion: 1,
     bundles
-  });
+  }, null, 2)}\n`, "application/json; charset=utf-8");
+}
+
+async function readStoreCatalogFromClient(client: BundleStoreClient, catalogKey: string): Promise<RemoteStoreCatalogEntry[]> {
+  const text = await client.getText(catalogKey);
+  if (!text) {
+    return [];
+  }
+
+  const catalog = remoteStoreCatalogSchema.parse(JSON.parse(text));
+  return catalog.bundles;
 }
 
 export async function uninstallBundleOrSkill(bundleOrSkill: string, options: UninstallOptions = {}): Promise<UninstallResult> {

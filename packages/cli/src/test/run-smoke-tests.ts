@@ -18,6 +18,7 @@ import {
   parseRemoteBundleReference,
   publishBundle,
   repairInstallState,
+  setBundleStoreClientFactoryForTests,
   uninstallAll,
   uninstallBundleOrSkill,
   unpublishBundle,
@@ -663,6 +664,8 @@ await run("default bundle store install resolves latest and supports explicit ve
 
 await run("publish writes a specific local bundle into a filesystem-backed store and updates catalog", async () => {
   await withTempRepo(async () => {
+    const store = await startMockPublishedStore();
+    setBundleStoreClientFactoryForTests(store.clientFactory);
     const bundlePath = await createBundle({
       bundleName: "publish-pack",
       bundleVersion: "1.2.3",
@@ -671,88 +674,96 @@ await run("publish writes a specific local bundle into a filesystem-backed store
       description: "Publishable onboarding skill",
       instructions: "Published instructions"
     });
-    const storeRoot = path.join(process.cwd(), "bundle-store");
-
-    const result = await publishBundle(bundlePath, { storePath: storeRoot });
-    const catalog = await fs.readJson(path.join(storeRoot, "catalog.json"));
-    const publishedBundleYaml = await fs.readFile(
-      path.join(storeRoot, "bundles", "publish-pack", "1.2.3", "bundle.yaml"),
-      "utf8"
-    );
-
-    assert.equal(result.name, "publish-pack");
-    assert.equal(result.version, "1.2.3");
-    assert.equal(result.bundlePath, "bundles/publish-pack/1.2.3");
-    assert.ok(result.publishedFiles.includes("bundle.yaml"));
-    assert.ok(result.publishedFiles.includes("skills/repo-map/skill.yaml"));
-    assert.equal(catalog.catalogVersion, 1);
-    assert.equal(catalog.bundles[0]?.name, "publish-pack");
-    assert.equal(catalog.bundles[0]?.latestVersion, "1.2.3");
-    assert.deepEqual(catalog.bundles[0]?.versions, ["1.2.3"]);
-    assert.match(publishedBundleYaml, /name: publish-pack/);
-  });
-});
-
-await run("publish rejects republishing the same bundle version into the same store", async () => {
-  await withTempRepo(async () => {
-    const bundlePath = await createBundle({
-      bundleName: "publish-pack",
-      bundleVersion: "1.2.3",
-      skillName: "repo-map",
-      skillId: "acme.repo.repo-map",
-      description: "Publishable onboarding skill",
-      instructions: "Published instructions"
-    });
-    const storeRoot = path.join(process.cwd(), "bundle-store");
-
-    await publishBundle(bundlePath, { storePath: storeRoot });
-
-    await assert.rejects(
-      publishBundle(bundlePath, { storePath: storeRoot }),
-      /already exists in the bundle store/
-    );
-  });
-});
-
-await run("unpublish removes a published bundle version and cleans the catalog entry when it was the last version", async () => {
-  await withTempRepo(async () => {
-    const bundlePath = await createBundle({
-      bundleName: "publish-pack",
-      bundleVersion: "1.2.3",
-      skillName: "repo-map",
-      skillId: "acme.repo.repo-map",
-      description: "Publishable onboarding skill",
-      instructions: "Published instructions"
-    });
-    const storeRoot = path.join(process.cwd(), "bundle-store");
-
-    await publishBundle(bundlePath, { storePath: storeRoot });
-    const result = await unpublishBundle(bundlePath, { storePath: storeRoot });
-
-    assert.equal(result.name, "publish-pack");
-    assert.equal(result.version, "1.2.3");
-    assert.equal(result.removedBundle, true);
-    assert.equal(await fs.pathExists(path.join(storeRoot, "bundles", "publish-pack", "1.2.3")), false);
-    assert.equal(await fs.pathExists(path.join(storeRoot, "catalog.json")), false);
-  });
-});
-
-await run("published bundle store output can be consumed through the existing store install flow", async () => {
-  await withTempRepo(async () => {
-    const bundlePath = await createBundle({
-      bundleName: "publish-pack",
-      bundleVersion: "1.2.3",
-      skillName: "repo-map",
-      skillId: "acme.repo.repo-map",
-      description: "Publishable onboarding skill",
-      instructions: "Published instructions"
-    });
-    const storeRoot = path.join(process.cwd(), "bundle-store");
-
-    await publishBundle(bundlePath, { storePath: storeRoot });
-    const store = await startStaticBundleStore(storeRoot);
-
     try {
+      const result = await publishBundle(bundlePath, { storeUrl: store.baseUrl, region: "us-east-1" });
+      const catalog = JSON.parse(store.objects.get("catalog.json") ?? "{}");
+      const publishedBundleYaml = store.objects.get("bundles/publish-pack/1.2.3/bundle.yaml") ?? "";
+
+      assert.equal(result.name, "publish-pack");
+      assert.equal(result.version, "1.2.3");
+      assert.equal(result.bundlePath, "bundles/publish-pack/1.2.3");
+      assert.ok(result.publishedFiles.includes("bundle.yaml"));
+      assert.ok(result.publishedFiles.includes("skills/repo-map/skill.yaml"));
+      assert.equal(catalog.catalogVersion, 1);
+      assert.equal(catalog.bundles[0]?.name, "publish-pack");
+      assert.equal(catalog.bundles[0]?.latestVersion, "1.2.3");
+      assert.deepEqual(catalog.bundles[0]?.versions, ["1.2.3"]);
+      assert.match(publishedBundleYaml, /name: publish-pack/);
+    } finally {
+      setBundleStoreClientFactoryForTests(null);
+      await store.close();
+    }
+  });
+});
+
+await run("publish rejects republishing the same bundle version into the same s3 store", async () => {
+  await withTempRepo(async () => {
+    const store = await startMockPublishedStore();
+    setBundleStoreClientFactoryForTests(store.clientFactory);
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    try {
+      await publishBundle(bundlePath, { storeUrl: store.baseUrl, region: "us-east-1" });
+
+      await assert.rejects(
+        publishBundle(bundlePath, { storeUrl: store.baseUrl, region: "us-east-1" }),
+        /already exists in the bundle store/
+      );
+    } finally {
+      setBundleStoreClientFactoryForTests(null);
+      await store.close();
+    }
+  });
+});
+
+await run("unpublish removes a published bundle version from s3 and cleans the catalog entry when it was the last version", async () => {
+  await withTempRepo(async () => {
+    const store = await startMockPublishedStore();
+    setBundleStoreClientFactoryForTests(store.clientFactory);
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    try {
+      await publishBundle(bundlePath, { storeUrl: store.baseUrl, region: "us-east-1" });
+      const result = await unpublishBundle(bundlePath, { storeUrl: store.baseUrl, region: "us-east-1" });
+
+      assert.equal(result.name, "publish-pack");
+      assert.equal(result.version, "1.2.3");
+      assert.equal(result.removedBundle, true);
+      assert.equal(store.objects.has("bundles/publish-pack/1.2.3/bundle.yaml"), false);
+      assert.equal(store.objects.has("catalog.json"), false);
+    } finally {
+      setBundleStoreClientFactoryForTests(null);
+      await store.close();
+    }
+  });
+});
+
+await run("published s3 bundle store output can be consumed through the existing store install flow", async () => {
+  await withTempRepo(async () => {
+    const store = await startMockPublishedStore();
+    setBundleStoreClientFactoryForTests(store.clientFactory);
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    try {
+      await publishBundle(bundlePath, { storeUrl: store.baseUrl, region: "us-east-1" });
       await fs.writeJson(path.join(process.cwd(), "skillcast.config.json"), {
         defaultBundleStoreUrl: store.baseUrl
       }, { spaces: 2 });
@@ -763,12 +774,13 @@ await run("published bundle store output can be consumed through the existing st
       assert.equal(result.resolvedVersion, "1.2.3");
       assert.match(installedFile, /Published instructions/);
 
-      await unpublishBundle("publish-pack@1.2.3", { storePath: storeRoot });
+      await unpublishBundle("publish-pack@1.2.3", { storeUrl: store.baseUrl, region: "us-east-1" });
       await assert.rejects(
         inspectBundle("publish-pack@1.2.3"),
         /was not found in the default bundle store|Artifact request failed/
       );
     } finally {
+      setBundleStoreClientFactoryForTests(null);
       await store.close();
     }
   });
@@ -1406,11 +1418,14 @@ async function startMockBundleStore(options: {
   };
 }
 
-async function startStaticBundleStore(storeRoot: string): Promise<{
+async function startMockPublishedStore(): Promise<{
   baseUrl: string;
+  objects: Map<string, string>;
+  clientFactory: ReturnType<typeof createMockBundleStoreClientFactory>;
   close: () => Promise<void>;
 }> {
   let baseUrl = "";
+  const objects = new Map<string, string>();
 
   const server = http.createServer(async (req, res) => {
     if (!req.url) {
@@ -1421,36 +1436,27 @@ async function startStaticBundleStore(storeRoot: string): Promise<{
 
     const url = new URL(req.url, "http://127.0.0.1");
     const relativePath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-    const targetPath = path.resolve(storeRoot, relativePath);
-    const relativeTargetPath = path.relative(path.resolve(storeRoot), targetPath);
-
-    if (relativeTargetPath.startsWith("..") || path.isAbsolute(relativeTargetPath)) {
+    const normalizedPath = relativePath.replace(/\\/g, "/");
+    if (normalizedPath.startsWith("../") || normalizedPath === "..") {
       res.writeHead(400, { "content-type": "text/plain" });
       res.end("invalid path");
       return;
     }
 
-    if (!(await fs.pathExists(targetPath))) {
+    if (!objects.has(normalizedPath)) {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("missing file");
       return;
     }
 
-    const stat = await fs.stat(targetPath);
-    if (!stat.isFile()) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      res.end("missing file");
-      return;
-    }
-
-    const contentType = targetPath.endsWith(".json")
+    const contentType = normalizedPath.endsWith(".json")
       ? "application/json"
-      : targetPath.endsWith(".md")
+      : normalizedPath.endsWith(".md")
         ? "text/markdown"
         : "text/plain";
 
     res.writeHead(200, { "content-type": contentType });
-    res.end(await fs.readFile(targetPath));
+    res.end(objects.get(normalizedPath) ?? "");
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -1467,10 +1473,32 @@ async function startStaticBundleStore(storeRoot: string): Promise<{
 
   return {
     baseUrl,
+    objects,
+    clientFactory: createMockBundleStoreClientFactory(objects, baseUrl),
     close: async () => {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
       });
     }
+  };
+}
+
+function createMockBundleStoreClientFactory(objects: Map<string, string>, expectedBaseUrl: string) {
+  return (target: { baseUrl: string }) => {
+    assert.equal(target.baseUrl, expectedBaseUrl);
+
+    return {
+      getText: async (key: string) => objects.get(key) ?? null,
+      putText: async (key: string, content: string) => {
+        objects.set(key, content);
+      },
+      exists: async (key: string) => objects.has(key),
+      listKeys: async (prefix: string) => [...objects.keys()].filter((key) => key.startsWith(prefix)),
+      deleteKeys: async (keys: string[]) => {
+        for (const key of keys) {
+          objects.delete(key);
+        }
+      }
+    };
   };
 }
