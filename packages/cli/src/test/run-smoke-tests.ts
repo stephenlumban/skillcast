@@ -311,22 +311,10 @@ await run("manifest v2 is migrated through lifecycle reads", async () => {
   });
 });
 
-await run("remote bundle references parse into typed selectors", async () => {
-  const floating = parseRemoteBundleReference("skillcast:acme/repo-onboarding");
-  const versioned = parseRemoteBundleReference("skillcast:acme/repo-onboarding@1.4.2");
-  const tagged = parseRemoteBundleReference("skillcast://registry.skillcast.dev/acme/repo-onboarding@stable");
-
-  assert.deepEqual(floating, {
-    raw: "skillcast:acme/repo-onboarding",
-    registry: "default",
-    namespace: "acme",
-    bundle: "repo-onboarding",
-    selector: { mode: "floating" },
-    requestedRef: "skillcast:acme/repo-onboarding"
-  });
-  assert.deepEqual(versioned?.selector, { mode: "version", value: "1.4.2" });
-  assert.equal(tagged?.registry, "registry.skillcast.dev");
-  assert.deepEqual(tagged?.selector, { mode: "tag", value: "stable" });
+await run("registry-style remote references are no longer parsed", async () => {
+  assert.equal(parseRemoteBundleReference("skillcast:acme/repo-onboarding"), null);
+  assert.equal(parseRemoteBundleReference("skillcast:acme/repo-onboarding@1.4.2"), null);
+  assert.equal(parseRemoteBundleReference("skillcast://registry.skillcast.dev/acme/repo-onboarding@stable"), null);
   assert.equal(parseRemoteBundleReference("./local-pack"), null);
 });
 
@@ -359,6 +347,31 @@ await run("inspect supports remote bundle references through registry resolution
   }
 });
 
+await run("inspect supports direct artifact URLs", async () => {
+  const artifact = createRemoteArtifact({
+    bundleName: "url-pack",
+    bundleVersion: "1.0.0",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Direct URL onboarding skill",
+    instructions: "Direct URL instructions"
+  });
+  const server = await startArtifactServer({ artifactBody: artifact });
+
+  try {
+    const payload = await inspectBundle(server.artifactUrl);
+
+    assert.equal(payload.name, "url-pack");
+    assert.equal(payload.version, "1.0.0");
+    assert.equal(payload.source, server.artifactUrl);
+    assert.equal(payload.resolvedVersion, undefined);
+    assert.equal(payload.resolvedDigest, undefined);
+    assert.ok(payload.skills.some((skill) => skill.id === "acme.repo.repo-map"));
+  } finally {
+    await server.close();
+  }
+});
+
 await run("validate and list skills support remote bundle references", async () => {
   const artifact = createRemoteArtifact({
     bundleName: "remote-pack",
@@ -384,6 +397,50 @@ await run("validate and list skills support remote bundle references", async () 
     assert.ok(payload.skills.some((skill) => skill.id === "acme.repo.repo-map"));
   } finally {
     await registry.close();
+  }
+});
+
+await run("direct artifact URL install writes manifest url source metadata and updates cleanly", async () => {
+  const initialArtifact = createRemoteArtifact({
+    bundleName: "url-pack",
+    bundleVersion: "1.0.0",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Direct URL onboarding skill",
+    instructions: "Direct URL instructions"
+  });
+  const updatedArtifact = createRemoteArtifact({
+    bundleName: "url-pack",
+    bundleVersion: "1.1.0",
+    skillName: "repo-map",
+    skillId: "acme.repo.repo-map",
+    description: "Direct URL onboarding skill",
+    instructions: "Updated direct URL instructions"
+  });
+  const server = await startArtifactServer({ artifactBody: initialArtifact });
+
+  try {
+    await withTempRepo(async () => {
+      const result = await installBundle(server.artifactUrl);
+      const manifest = await fs.readJson(path.join(process.cwd(), ".skillcast", "manifest.json"));
+
+      assert.equal(result.action, "installed");
+      assert.equal(result.resolvedVersion, undefined);
+      assert.equal(result.resolvedDigest, undefined);
+      assert.equal(manifest.bundles[0]?.sourceType, "url");
+      assert.equal(manifest.bundles[0]?.source, server.artifactUrl);
+      assert.equal(manifest.bundles[0]?.resolution, undefined);
+
+      server.update({ artifactBody: updatedArtifact });
+
+      const updated = await installBundle(server.artifactUrl, { update: true });
+      const installedFile = await fs.readFile(path.join(process.cwd(), ".skillcast", "skills", "repo-map", "SKILL.md"), "utf8");
+
+      assert.equal(updated.action, "updated");
+      assert.match(installedFile, /Updated direct URL instructions/);
+    });
+  } finally {
+    await server.close();
   }
 });
 
@@ -477,6 +534,83 @@ await run("default registry config resolves skillcast refs without explicit host
     });
   } finally {
     await registry.close();
+  }
+});
+
+await run("default bundle store resolves bare bundle names and exposes latest version in pack list", async () => {
+  const store = await startMockBundleStore({
+    bundles: [
+      createStoreBundleVersion({
+        bundleName: "team-onboarding-pack",
+        bundleVersion: "1.4.2",
+        skillName: "repo-map",
+        skillId: "acme.repo.repo-map",
+        description: "Remote onboarding skill",
+        instructions: "Remote instructions"
+      })
+    ]
+  });
+
+  try {
+    await withTempRepo(async () => {
+      await fs.writeJson(path.join(process.cwd(), "skillcast.config.json"), {
+        defaultBundleStoreUrl: store.baseUrl
+      }, { spaces: 2 });
+
+      const payload = await inspectBundle("team-onboarding-pack@1.4.2");
+      const packs = await getPackList();
+
+      assert.equal(payload.name, "team-onboarding-pack");
+      assert.equal(payload.resolvedVersion, "1.4.2");
+      assert.ok(packs.some((pack) => pack.name === "team-onboarding-pack" && pack.version === "1.4.2" && pack.path === "store:team-onboarding-pack"));
+    });
+  } finally {
+    await store.close();
+  }
+});
+
+await run("default bundle store install resolves latest and supports explicit version pins", async () => {
+  const store = await startMockBundleStore({
+    bundles: [
+      createStoreBundleVersion({
+        bundleName: "team-onboarding-pack",
+        bundleVersion: "1.4.1",
+        skillName: "repo-map",
+        skillId: "acme.repo.repo-map",
+        description: "Remote onboarding skill",
+        instructions: "Older remote instructions"
+      }),
+      createStoreBundleVersion({
+        bundleName: "team-onboarding-pack",
+        bundleVersion: "1.4.2",
+        skillName: "repo-map",
+        skillId: "acme.repo.repo-map",
+        description: "Remote onboarding skill",
+        instructions: "Latest remote instructions"
+      })
+    ]
+  });
+
+  try {
+    await withTempRepo(async () => {
+      await fs.writeJson(path.join(process.cwd(), "skillcast.config.json"), {
+        defaultBundleStoreUrl: store.baseUrl
+      }, { spaces: 2 });
+
+      const result = await installBundle("team-onboarding-pack");
+      const manifest = await fs.readJson(path.join(process.cwd(), ".skillcast", "manifest.json"));
+      const installedFile = await fs.readFile(path.join(process.cwd(), ".skillcast", "skills", "repo-map", "SKILL.md"), "utf8");
+
+      assert.equal(result.resolvedVersion, "1.4.2");
+      assert.equal(manifest.bundles[0]?.sourceType, "store");
+      assert.equal(manifest.bundles[0]?.bundleVersion, "1.4.2");
+      assert.match(installedFile, /Latest remote instructions/);
+
+      const pinned = await inspectBundle("team-onboarding-pack@1.4.1");
+      assert.equal(pinned.resolvedVersion, "1.4.1");
+    });
+  } finally {
+    await store.close();
   }
 });
 
@@ -876,6 +1010,200 @@ async function startMockRegistry(options: {
         state.digest = next.digest;
       }
     },
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  };
+}
+
+async function startArtifactServer(options: {
+  artifactBody: string;
+}): Promise<{
+  artifactUrl: string;
+  update: (next: { artifactBody: string }) => void;
+  close: () => Promise<void>;
+}> {
+  const state = {
+    artifactBody: options.artifactBody
+  };
+  let artifactUrl = "";
+
+  const server = http.createServer((req, res) => {
+    if (!req.url) {
+      res.writeHead(500);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (url.pathname === "/artifact.json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(state.artifactBody);
+      return;
+    }
+
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("missing route");
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.on("error", reject);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Could not determine artifact server address.");
+  }
+
+  artifactUrl = `http://127.0.0.1:${address.port}/artifact.json`;
+
+  return {
+    artifactUrl,
+    update: (next) => {
+      state.artifactBody = next.artifactBody;
+    },
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  };
+}
+
+function createStoreBundleVersion(options: {
+  bundleName: string;
+  bundleVersion: string;
+  skillName: string;
+  skillId: string;
+  description: string;
+  instructions: string;
+}): {
+  name: string;
+  version: string;
+  description: string;
+  files: Record<string, string>;
+} {
+  return {
+    name: options.bundleName,
+    version: options.bundleVersion,
+    description: options.description,
+    files: {
+      "bundle.yaml": [
+        `name: ${options.bundleName}`,
+        `version: ${options.bundleVersion}`,
+        `description: ${options.description}`,
+        "skills:",
+        `  - name: ${options.skillName}`,
+        `    path: ./skills/${options.skillName}`,
+        "targets:",
+        "  - generic-agent",
+        ""
+      ].join("\n"),
+      [`skills/${options.skillName}/skill.yaml`]: [
+        `id: ${options.skillId}`,
+        `name: ${options.skillName}`,
+        `version: ${options.bundleVersion}`,
+        `description: ${options.description}`,
+        "entry:",
+        "  instructions: ./instructions.md",
+        "inputs:",
+        "  - name: input",
+        "    type: string",
+        "    required: true",
+        "outputs:",
+        "  - name: result",
+        "    type: string",
+        "compatibility:",
+        "  runtimes:",
+        "    - generic-agent",
+        ""
+      ].join("\n"),
+      [`skills/${options.skillName}/instructions.md`]: options.instructions
+    }
+  };
+}
+
+async function startMockBundleStore(options: {
+  bundles: Array<{
+    name: string;
+    version: string;
+    description: string;
+    files: Record<string, string>;
+  }>;
+}): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+}> {
+  let baseUrl = "";
+
+  const server = http.createServer((req, res) => {
+    if (!req.url) {
+      res.writeHead(500);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (url.pathname === "/catalog.json") {
+      const bundles = [...new Set(options.bundles.map((bundle) => bundle.name))]
+        .map((name) => {
+          const matching = options.bundles
+            .filter((bundle) => bundle.name === name)
+            .sort((left, right) => left.version.localeCompare(right.version));
+          const latest = matching[matching.length - 1];
+          return {
+            name,
+            description: latest.description,
+            latestVersion: latest.version,
+            versions: matching.map((bundle) => bundle.version)
+          };
+        });
+
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        catalogVersion: 1,
+        bundles
+      }));
+      return;
+    }
+
+    const match = url.pathname.match(/^\/bundles\/([^/]+)\/([^/]+)\/(.+)$/);
+    if (match) {
+      const [, bundleName, version, relativePath] = match;
+      const bundle = options.bundles.find((entry) => entry.name === decodeURIComponent(bundleName) && entry.version === decodeURIComponent(version));
+      const file = bundle?.files[decodeURIComponent(relativePath)];
+      if (!bundle || file === undefined) {
+        res.writeHead(404, { "content-type": "text/plain" });
+        res.end("missing file");
+        return;
+      }
+
+      res.writeHead(200, { "content-type": relativePath.endsWith(".md") ? "text/markdown" : "text/plain" });
+      res.end(file);
+      return;
+    }
+
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("missing route");
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.on("error", reject);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Could not determine bundle store address.");
+  }
+
+  baseUrl = `http://127.0.0.1:${address.port}`;
+
+  return {
+    baseUrl,
     close: async () => {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());

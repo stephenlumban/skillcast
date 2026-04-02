@@ -76,6 +76,91 @@ The next phase is registry and publish-contract definition, not new platform com
 - local lifecycle safety remains the baseline for any future remote install flow
 - `skillcast login` stays out of scope until authenticated remote registry behavior actually exists
 
+For internal distribution, the CLI can also fetch a bundle artifact directly from a public `http(s)` URL. That gives you a low-friction path for S3-hosted packs without standing up the full registry API first.
+
+Example:
+
+```bash
+skillcast inspect https://my-team-bundles.s3.ap-southeast-1.amazonaws.com/repo-onboarding.json
+skillcast install https://my-team-bundles.s3.ap-southeast-1.amazonaws.com/repo-onboarding.json
+skillcast install https://my-team-bundles.s3.ap-southeast-1.amazonaws.com/repo-onboarding.json --update
+```
+
+The direct URL target should serve the same JSON artifact shape used by the registry artifact download:
+
+```json
+{
+  "files": [
+    {
+      "path": "bundle.yaml",
+      "content": "name: repo-onboarding\nversion: 1.0.0\n..."
+    },
+    {
+      "path": "skills/repo-map/skill.yaml",
+      "content": "id: acme.repo.repo-map\nname: repo-map\n..."
+    },
+    {
+      "path": "skills/repo-map/instructions.md",
+      "content": "Explain the repo layout..."
+    }
+  ]
+}
+```
+
+If you want S3 to behave like the default internal bundle source instead of passing full URLs every time, configure a bundle store base URL:
+
+```json
+{
+  "defaultBundleStoreUrl": "https://my-team-bundles.s3.ap-southeast-1.amazonaws.com"
+}
+```
+
+Then the CLI can resolve bare bundle names and version pins:
+
+```bash
+skillcast list packs
+skillcast inspect team-onboarding-pack
+skillcast inspect team-onboarding-pack@1.4.2
+skillcast install team-onboarding-pack
+skillcast install team-onboarding-pack@1.4.2
+```
+
+Expected S3 layout:
+
+```text
+catalog.json
+bundles/
+  team-onboarding-pack/
+    1.4.1/
+      bundle.yaml
+      skills/
+        repo-map/
+          skill.yaml
+          instructions.md
+    1.4.2/
+      bundle.yaml
+      skills/
+        repo-map/
+          skill.yaml
+          instructions.md
+```
+
+Expected `catalog.json` shape:
+
+```json
+{
+  "catalogVersion": 1,
+  "bundles": [
+    {
+      "name": "team-onboarding-pack",
+      "description": "Repo understanding and onboarding workflow bundle",
+      "latestVersion": "1.4.2",
+      "versions": ["1.4.1", "1.4.2"]
+    }
+  ]
+}
+```
+
 ## Example Bundles
 
 - `pr-review-pack`: minimal v0 example from the original handover

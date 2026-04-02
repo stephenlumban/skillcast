@@ -27,7 +27,7 @@
     "url": "https://github.com/stephenlumban/skillcast/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "restricted"
   },
   "engines": {
     "node": ">=20"
