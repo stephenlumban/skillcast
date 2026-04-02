@@ -32,11 +32,22 @@
 
 ## Next Milestones
 
-### Phase 4: Future Platform Direction
+### Phase 4: Registry Boundary Definition
 
-- remote bundle sources such as `github:` and `https:`
+- define the remote registry model in `docs/registry-spec.md`
+- define manifest and lock evolution for remote provenance in `docs/remote-install-state.md`
+- define the registry read/write API contract in `docs/registry-api.md`
+- define the CLI implementation sequence in `docs/remote-cli-plan.md`
+- define remote bundle identity as `registry host + namespace + bundle name`
+- define source resolution and version pinning rules before any remote install implementation
+- define publish authorization, visibility, and reproducibility expectations
+- keep `skillcast login` out of scope until authenticated remote behavior exists
+
+### Later Platform Work
+
+- remote bundle sources implemented against the registry contract
 - alias resolution beyond the current binary alias
 - execution/runtime layer for running installed skills directly
 - hosted registry and platform services
 
-These remain future milestones because they require product and protocol decisions beyond the local lifecycle model that is now in place.
+These remain future milestones because they require product and protocol decisions beyond the local lifecycle model that is now in place. The registry contract is the next prerequisite.

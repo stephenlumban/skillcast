@@ -18,6 +18,8 @@ skillcast uninstall <bundle-or-skill> --dry-run
 skillcast uninstall --all
 skillcast repair [--write]
 skillcast init [path]
+skillcast publish <bundle-path-or-pack-name> [--store-path <path>] [--dry-run] [--verbose]
+skillcast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-path <path>] [--dry-run]
 ```
 
 Alias support is shipped through the same CLI binary:
@@ -35,6 +37,8 @@ cast uninstall <bundle-or-skill>
 cast uninstall <bundle-or-skill> --dry-run
 cast uninstall --all
 cast repair [--write]
+cast publish <bundle-path-or-pack-name> [--store-path <path>] [--dry-run] [--verbose]
+cast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-path <path>] [--dry-run]
 ```
 
 ## Project Layout
@@ -65,6 +69,223 @@ The local lifecycle is now versioned and safe to evolve:
 - update and uninstall flows detect locally modified installed files
 - collisions warn by default and require `--force` for explicit overwrite paths
 
+## Platform Boundary
+
+The next phase is registry and publish-contract definition, not new platform commands.
+
+- remote distribution semantics are defined in `docs/registry-spec.md`
+- remote provenance and manifest evolution are defined in `docs/remote-install-state.md`
+- registry read/write transport expectations are defined in `docs/registry-api.md`
+- CLI sequencing for remote work is defined in `docs/remote-cli-plan.md`
+- local lifecycle safety remains the baseline for any future remote install flow
+- `skillcast login` stays out of scope until authenticated remote registry behavior actually exists
+
+For internal distribution, the CLI can also fetch a bundle artifact directly from a public `http(s)` URL. That gives you a low-friction path for S3-hosted packs without standing up the full registry API first.
+
+Example:
+
+```bash
+skillcast inspect https://my-team-bundles.s3.ap-southeast-1.amazonaws.com/repo-onboarding.json
+skillcast install https://my-team-bundles.s3.ap-southeast-1.amazonaws.com/repo-onboarding.json
+skillcast install https://my-team-bundles.s3.ap-southeast-1.amazonaws.com/repo-onboarding.json --update
+```
+
+The direct URL target should serve the same JSON artifact shape used by the registry artifact download:
+
+```json
+{
+  "files": [
+    {
+      "path": "bundle.yaml",
+      "content": "name: repo-onboarding\nversion: 1.0.0\n..."
+    },
+    {
+      "path": "skills/repo-map/skill.yaml",
+      "content": "id: acme.repo.repo-map\nname: repo-map\n..."
+    },
+    {
+      "path": "skills/repo-map/instructions.md",
+      "content": "Explain the repo layout..."
+    }
+  ]
+}
+```
+
+If you want S3 to behave like the default internal bundle source instead of passing full URLs every time, configure a bundle store base URL:
+
+```json
+{
+  "defaultBundleStoreUrl": "https://my-team-bundles.s3.ap-southeast-1.amazonaws.com"
+}
+```
+
+Then the CLI can resolve bare bundle names and version pins:
+
+```bash
+skillcast list packs
+skillcast inspect team-onboarding-pack
+skillcast inspect team-onboarding-pack@1.4.2
+skillcast install team-onboarding-pack
+skillcast install team-onboarding-pack@1.4.2
+```
+
+Expected S3 layout:
+
+```text
+catalog.json
+bundles/
+  team-onboarding-pack/
+    1.4.1/
+      bundle.yaml
+      skills/
+        repo-map/
+          skill.yaml
+          instructions.md
+    1.4.2/
+      bundle.yaml
+      skills/
+        repo-map/
+          skill.yaml
+          instructions.md
+```
+
+Expected `catalog.json` shape:
+
+```json
+{
+  "catalogVersion": 1,
+  "bundles": [
+    {
+      "name": "team-onboarding-pack",
+      "description": "Repo understanding and onboarding workflow bundle",
+      "latestVersion": "1.4.2",
+      "versions": ["1.4.1", "1.4.2"]
+    }
+  ]
+}
+```
+
+## Authoring And Publishing Guide
+
+The intended workflow is:
+
+1. a human authors a bundle locally
+2. `skillcast validate` confirms the folder is a real bundle
+3. `skillcast publish` copies that validated bundle into the cloud/store layout
+
+### 1. Create A Bundle
+
+Start with a scaffold:
+
+```bash
+skillcast init ./my-bundle
+```
+
+That creates a folder like:
+
+```text
+my-bundle/
+  bundle.yaml
+  skills/
+    example-skill/
+      skill.yaml
+      instructions.md
+```
+
+Then replace the example content with the real skill instructions and metadata.
+
+Minimum files:
+
+- `bundle.yaml`: bundle name, version, description, included skills, target runtimes
+- `skills/<skill-name>/skill.yaml`: stable skill id, version, description, inputs, outputs, compatibility, and instruction entry
+- `skills/<skill-name>/instructions.md`: the actual human-authored skill instructions
+
+### 2. Validate Before Publish
+
+Validate the bundle root:
+
+```bash
+skillcast validate ./my-bundle
+skillcast inspect ./my-bundle
+```
+
+Publish uses the same validation path internally, so an invalid folder will fail before any store files are written.
+
+Validation checks include:
+
+- `bundle.yaml` exists and matches the schema
+- each referenced skill directory exists
+- each `skill.yaml` exists and matches the schema
+- each instructions file exists
+- skill names match between `bundle.yaml` and `skill.yaml`
+- bundle targets are supported by every skill
+- skill ids are unique
+- skill names are unique
+
+### 3. Configure A Store Target
+
+For local or CI publishing into a filesystem-backed store, either pass the target path explicitly:
+
+```bash
+skillcast publish ./my-bundle --store-path ./bundle-store
+```
+
+or configure a default publish path in `skillcast.config.json`:
+
+```json
+{
+  "defaultBundleStorePublishPath": "./bundle-store",
+  "defaultBundleStoreUrl": "https://my-team-bundles.s3.ap-southeast-1.amazonaws.com"
+}
+```
+
+`defaultBundleStorePublishPath` is the local directory the CLI writes to.
+`defaultBundleStoreUrl` is the remote URL other clients read from.
+
+Typical deployment flow:
+
+1. publish locally into a store folder
+2. sync that folder to S3 or your static host
+3. consumers install from the hosted `defaultBundleStoreUrl`
+
+### 4. Publish
+
+Publish the validated bundle:
+
+```bash
+skillcast publish ./my-bundle --store-path ./bundle-store
+```
+
+What publish does:
+
+- validates the bundle
+- rejects duplicate `<name>@<version>` publishes
+- writes `bundles/<name>/<version>/...`
+- updates `catalog.json` atomically
+
+Preview without writing:
+
+```bash
+skillcast publish ./my-bundle --store-path ./bundle-store --dry-run
+```
+
+### 5. Unpublish
+
+Remove a published version:
+
+```bash
+skillcast unpublish ./my-bundle --store-path ./bundle-store
+skillcast unpublish my-bundle@0.1.0 --store-path ./bundle-store
+```
+
+If the removed version is the last remaining version for that bundle, the CLI also removes the bundle entry from `catalog.json`.
+
+Preview without writing:
+
+```bash
+skillcast unpublish my-bundle@0.1.0 --store-path ./bundle-store --dry-run
+```
+
 ## Example Bundles
 
 - `pr-review-pack`: minimal v0 example from the original handover
@@ -88,4 +309,4 @@ node packages/cli/dist/index.js diff pr-workflow-pack
 node packages/cli/dist/index.js list installed
 ```
 
-See [Lifecycle Milestones](./docs/milestones.md) for the current implementation boundary and future platform milestones.
+See [Lifecycle Milestones](./docs/milestones.md) for the current implementation boundary and [Registry Spec](./docs/registry-spec.md) for the next platform-facing contract.
