@@ -18,6 +18,8 @@ skillcast uninstall <bundle-or-skill> --dry-run
 skillcast uninstall --all
 skillcast repair [--write]
 skillcast init [path]
+skillcast publish <bundle-path-or-pack-name> [--store-path <path>] [--dry-run] [--verbose]
+skillcast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-path <path>] [--dry-run]
 ```
 
 Alias support is shipped through the same CLI binary:
@@ -35,6 +37,8 @@ cast uninstall <bundle-or-skill>
 cast uninstall <bundle-or-skill> --dry-run
 cast uninstall --all
 cast repair [--write]
+cast publish <bundle-path-or-pack-name> [--store-path <path>] [--dry-run] [--verbose]
+cast unpublish <bundle-path-or-pack-name|bundle@version> [--version <version>] [--store-path <path>] [--dry-run]
 ```
 
 ## Project Layout
@@ -159,6 +163,127 @@ Expected `catalog.json` shape:
     }
   ]
 }
+```
+
+## Authoring And Publishing Guide
+
+The intended workflow is:
+
+1. a human authors a bundle locally
+2. `skillcast validate` confirms the folder is a real bundle
+3. `skillcast publish` copies that validated bundle into the cloud/store layout
+
+### 1. Create A Bundle
+
+Start with a scaffold:
+
+```bash
+skillcast init ./my-bundle
+```
+
+That creates a folder like:
+
+```text
+my-bundle/
+  bundle.yaml
+  skills/
+    example-skill/
+      skill.yaml
+      instructions.md
+```
+
+Then replace the example content with the real skill instructions and metadata.
+
+Minimum files:
+
+- `bundle.yaml`: bundle name, version, description, included skills, target runtimes
+- `skills/<skill-name>/skill.yaml`: stable skill id, version, description, inputs, outputs, compatibility, and instruction entry
+- `skills/<skill-name>/instructions.md`: the actual human-authored skill instructions
+
+### 2. Validate Before Publish
+
+Validate the bundle root:
+
+```bash
+skillcast validate ./my-bundle
+skillcast inspect ./my-bundle
+```
+
+Publish uses the same validation path internally, so an invalid folder will fail before any store files are written.
+
+Validation checks include:
+
+- `bundle.yaml` exists and matches the schema
+- each referenced skill directory exists
+- each `skill.yaml` exists and matches the schema
+- each instructions file exists
+- skill names match between `bundle.yaml` and `skill.yaml`
+- bundle targets are supported by every skill
+- skill ids are unique
+- skill names are unique
+
+### 3. Configure A Store Target
+
+For local or CI publishing into a filesystem-backed store, either pass the target path explicitly:
+
+```bash
+skillcast publish ./my-bundle --store-path ./bundle-store
+```
+
+or configure a default publish path in `skillcast.config.json`:
+
+```json
+{
+  "defaultBundleStorePublishPath": "./bundle-store",
+  "defaultBundleStoreUrl": "https://my-team-bundles.s3.ap-southeast-1.amazonaws.com"
+}
+```
+
+`defaultBundleStorePublishPath` is the local directory the CLI writes to.
+`defaultBundleStoreUrl` is the remote URL other clients read from.
+
+Typical deployment flow:
+
+1. publish locally into a store folder
+2. sync that folder to S3 or your static host
+3. consumers install from the hosted `defaultBundleStoreUrl`
+
+### 4. Publish
+
+Publish the validated bundle:
+
+```bash
+skillcast publish ./my-bundle --store-path ./bundle-store
+```
+
+What publish does:
+
+- validates the bundle
+- rejects duplicate `<name>@<version>` publishes
+- writes `bundles/<name>/<version>/...`
+- updates `catalog.json` atomically
+
+Preview without writing:
+
+```bash
+skillcast publish ./my-bundle --store-path ./bundle-store --dry-run
+```
+
+### 5. Unpublish
+
+Remove a published version:
+
+```bash
+skillcast unpublish ./my-bundle --store-path ./bundle-store
+skillcast unpublish my-bundle@0.1.0 --store-path ./bundle-store
+```
+
+If the removed version is the last remaining version for that bundle, the CLI also removes the bundle entry from `catalog.json`.
+
+Preview without writing:
+
+```bash
+skillcast unpublish my-bundle@0.1.0 --store-path ./bundle-store --dry-run
 ```
 
 ## Example Bundles

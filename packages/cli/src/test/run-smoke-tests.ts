@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "fs-extra";
 import http from "node:http";
@@ -6,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  addSkillToBundle,
   diffBundle,
   getInstalledBundles,
   getInstalledSkills,
@@ -14,9 +16,11 @@ import {
   installBundle,
   listBundleSkills,
   parseRemoteBundleReference,
+  publishBundle,
   repairInstallState,
   uninstallAll,
   uninstallBundleOrSkill,
+  unpublishBundle,
   validateBundle
 } from "../index.js";
 
@@ -308,6 +312,49 @@ await run("manifest v2 is migrated through lifecycle reads", async () => {
 
     assert.equal(bundles[0]?.bundle, "legacy-pack");
     assert.equal(manifest.manifestVersion, 2);
+  });
+});
+
+await run("add-skill adds a scaffolded skill into an existing bundle and keeps it valid", async () => {
+  await withTempRepo(async () => {
+    const bundlePath = await createBundle({
+      bundleName: "local-pack",
+      bundleVersion: "0.1.0",
+      skillName: "alpha-skill",
+      skillId: "org.example.alpha",
+      description: "Initial alpha skill",
+      instructions: "Initial instructions"
+    });
+
+    const result = await addSkillToBundle(bundlePath, "beta-skill");
+    const bundle = await validateBundle(bundlePath);
+    const bundleYaml = await fs.readFile(path.join(bundlePath, "bundle.yaml"), "utf8");
+    const skillYaml = await fs.readFile(path.join(bundlePath, "skills", "beta-skill", "skill.yaml"), "utf8");
+
+    assert.equal(result.bundle, "local-pack");
+    assert.equal(result.skill, "beta-skill");
+    assert.ok(bundle.skills.some((skill) => skill.config.name === "beta-skill"));
+    assert.match(bundleYaml, /name: beta-skill/);
+    assert.match(skillYaml, /id: org\.example\.local-pack\.beta-skill/);
+    assert.match(skillYaml, /version: 0.1.0/);
+  });
+});
+
+await run("add-skill rejects duplicate skill names in an existing bundle", async () => {
+  await withTempRepo(async () => {
+    const bundlePath = await createBundle({
+      bundleName: "local-pack",
+      bundleVersion: "0.1.0",
+      skillName: "alpha-skill",
+      skillId: "org.example.alpha",
+      description: "Initial alpha skill",
+      instructions: "Initial instructions"
+    });
+
+    await assert.rejects(
+      addSkillToBundle(bundlePath, "alpha-skill"),
+      /already contains a skill named/
+    );
   });
 });
 
@@ -614,6 +661,119 @@ await run("default bundle store install resolves latest and supports explicit ve
   }
 });
 
+await run("publish writes a specific local bundle into a filesystem-backed store and updates catalog", async () => {
+  await withTempRepo(async () => {
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    const storeRoot = path.join(process.cwd(), "bundle-store");
+
+    const result = await publishBundle(bundlePath, { storePath: storeRoot });
+    const catalog = await fs.readJson(path.join(storeRoot, "catalog.json"));
+    const publishedBundleYaml = await fs.readFile(
+      path.join(storeRoot, "bundles", "publish-pack", "1.2.3", "bundle.yaml"),
+      "utf8"
+    );
+
+    assert.equal(result.name, "publish-pack");
+    assert.equal(result.version, "1.2.3");
+    assert.equal(result.bundlePath, "bundles/publish-pack/1.2.3");
+    assert.ok(result.publishedFiles.includes("bundle.yaml"));
+    assert.ok(result.publishedFiles.includes("skills/repo-map/skill.yaml"));
+    assert.equal(catalog.catalogVersion, 1);
+    assert.equal(catalog.bundles[0]?.name, "publish-pack");
+    assert.equal(catalog.bundles[0]?.latestVersion, "1.2.3");
+    assert.deepEqual(catalog.bundles[0]?.versions, ["1.2.3"]);
+    assert.match(publishedBundleYaml, /name: publish-pack/);
+  });
+});
+
+await run("publish rejects republishing the same bundle version into the same store", async () => {
+  await withTempRepo(async () => {
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    const storeRoot = path.join(process.cwd(), "bundle-store");
+
+    await publishBundle(bundlePath, { storePath: storeRoot });
+
+    await assert.rejects(
+      publishBundle(bundlePath, { storePath: storeRoot }),
+      /already exists in the bundle store/
+    );
+  });
+});
+
+await run("unpublish removes a published bundle version and cleans the catalog entry when it was the last version", async () => {
+  await withTempRepo(async () => {
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    const storeRoot = path.join(process.cwd(), "bundle-store");
+
+    await publishBundle(bundlePath, { storePath: storeRoot });
+    const result = await unpublishBundle(bundlePath, { storePath: storeRoot });
+
+    assert.equal(result.name, "publish-pack");
+    assert.equal(result.version, "1.2.3");
+    assert.equal(result.removedBundle, true);
+    assert.equal(await fs.pathExists(path.join(storeRoot, "bundles", "publish-pack", "1.2.3")), false);
+    assert.equal(await fs.pathExists(path.join(storeRoot, "catalog.json")), false);
+  });
+});
+
+await run("published bundle store output can be consumed through the existing store install flow", async () => {
+  await withTempRepo(async () => {
+    const bundlePath = await createBundle({
+      bundleName: "publish-pack",
+      bundleVersion: "1.2.3",
+      skillName: "repo-map",
+      skillId: "acme.repo.repo-map",
+      description: "Publishable onboarding skill",
+      instructions: "Published instructions"
+    });
+    const storeRoot = path.join(process.cwd(), "bundle-store");
+
+    await publishBundle(bundlePath, { storePath: storeRoot });
+    const store = await startStaticBundleStore(storeRoot);
+
+    try {
+      await fs.writeJson(path.join(process.cwd(), "skillcast.config.json"), {
+        defaultBundleStoreUrl: store.baseUrl
+      }, { spaces: 2 });
+
+      const result = await installBundle("publish-pack");
+      const installedFile = await fs.readFile(path.join(process.cwd(), ".skillcast", "skills", "repo-map", "SKILL.md"), "utf8");
+
+      assert.equal(result.resolvedVersion, "1.2.3");
+      assert.match(installedFile, /Published instructions/);
+
+      await unpublishBundle("publish-pack@1.2.3", { storePath: storeRoot });
+      await assert.rejects(
+        inspectBundle("publish-pack@1.2.3"),
+        /was not found in the default bundle store|Artifact request failed/
+      );
+    } finally {
+      await store.close();
+    }
+  });
+});
+
 await run("remote inspect populates local artifact cache by digest", async () => {
   const artifact = createRemoteArtifact({
     bundleName: "remote-pack",
@@ -797,6 +957,13 @@ await run("repair detects missing and orphaned installed skills and can repair m
   });
 });
 
+await run("help subcommand prints CLI usage", async () => {
+  const output = await runCli(["packages/cli/dist/index.js", "help"], repoRoot);
+  assert.match(output, /Usage:/);
+  assert.match(output, /add-skill/);
+  assert.match(output, /publish/);
+});
+
 console.log("Smoke tests passed.");
 
 async function run(name: string, task: () => Promise<void>): Promise<void> {
@@ -820,6 +987,33 @@ async function withTempRepo(task: () => Promise<void>): Promise<void> {
     process.chdir(previousCwd);
     await fs.remove(tempRepo);
   }
+}
+
+async function runCli(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+
+      reject(new Error(stderr || stdout || `Command exited with code ${code ?? "unknown"}`));
+    });
+  });
 }
 
 async function createBundle(options: {
@@ -1198,6 +1392,75 @@ async function startMockBundleStore(options: {
   const address = server.address();
   if (!address || typeof address === "string") {
     throw new Error("Could not determine bundle store address.");
+  }
+
+  baseUrl = `http://127.0.0.1:${address.port}`;
+
+  return {
+    baseUrl,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  };
+}
+
+async function startStaticBundleStore(storeRoot: string): Promise<{
+  baseUrl: string;
+  close: () => Promise<void>;
+}> {
+  let baseUrl = "";
+
+  const server = http.createServer(async (req, res) => {
+    if (!req.url) {
+      res.writeHead(500);
+      res.end();
+      return;
+    }
+
+    const url = new URL(req.url, "http://127.0.0.1");
+    const relativePath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+    const targetPath = path.resolve(storeRoot, relativePath);
+    const relativeTargetPath = path.relative(path.resolve(storeRoot), targetPath);
+
+    if (relativeTargetPath.startsWith("..") || path.isAbsolute(relativeTargetPath)) {
+      res.writeHead(400, { "content-type": "text/plain" });
+      res.end("invalid path");
+      return;
+    }
+
+    if (!(await fs.pathExists(targetPath))) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("missing file");
+      return;
+    }
+
+    const stat = await fs.stat(targetPath);
+    if (!stat.isFile()) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("missing file");
+      return;
+    }
+
+    const contentType = targetPath.endsWith(".json")
+      ? "application/json"
+      : targetPath.endsWith(".md")
+        ? "text/markdown"
+        : "text/plain";
+
+    res.writeHead(200, { "content-type": contentType });
+    res.end(await fs.readFile(targetPath));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+    server.on("error", reject);
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Could not determine static bundle store address.");
   }
 
   baseUrl = `http://127.0.0.1:${address.port}`;

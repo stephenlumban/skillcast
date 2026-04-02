@@ -92,6 +92,21 @@ type InstalledSkillEntry = {
   };
 };
 
+type RegistryResolution = {
+  requestedRef: string;
+  mode: "floating" | "tag" | "version";
+  tag?: string;
+  package: {
+    registry: string;
+    namespace: string;
+    name: string;
+  };
+  resolvedVersion: string;
+  digest: string;
+  publishedAt?: string;
+  artifactUrl: string;
+};
+
 type ManifestEntry = {
   bundle: string;
   bundleVersion: string;
@@ -102,6 +117,7 @@ type ManifestEntry = {
   updatedAt: string;
   skillDir: string;
   skills: InstalledSkillEntry[];
+  resolution?: RegistryResolution;
 };
 
 type ManifestData = {
@@ -125,17 +141,41 @@ type StoreBundleReference = {
   baseUrl: string;
 };
 
-type ResolvedBundleReference = LocalBundleReference | StoreBundleReference;
+type RegistryBundleReference = {
+  input: string;
+  referenceType: "registry";
+  displaySource: string;
+  requestedRef: string;
+  registry: string;
+  namespace: string;
+  bundleName: string;
+  selector: {
+    mode: "floating" | "tag" | "version";
+    value?: string;
+  };
+};
+
+type UrlBundleReference = {
+  input: string;
+  referenceType: "url";
+  displaySource: string;
+  artifactUrl: string;
+};
+
+type ResolvedBundleReference = LocalBundleReference | StoreBundleReference | RegistryBundleReference | UrlBundleReference;
 
 type LoadedValidatedBundle = {
   resolved: ResolvedBundleReference;
   bundle: ValidatedBundle;
   resolvedVersion?: string;
+  resolvedDigest?: string;
+  resolution?: RegistryResolution;
 };
 
 type SkillcastConfig = {
   defaultRegistry?: string;
   defaultBundleStoreUrl?: string;
+  defaultBundleStorePublishPath?: string;
 };
 
 type CatalogEntry = {
@@ -219,6 +259,36 @@ export type InstallResult = {
   summary: string;
 };
 
+export type PublishResult = {
+  name: string;
+  version: string;
+  storePath: string;
+  bundlePath: string;
+  catalogPath: string;
+  publishedFiles: string[];
+  dryRun: boolean;
+  summary: string;
+};
+
+export type UnpublishResult = {
+  name: string;
+  version: string;
+  storePath: string;
+  bundlePath: string;
+  catalogPath: string;
+  removedBundle: boolean;
+  dryRun: boolean;
+  summary: string;
+};
+
+export type AddSkillResult = {
+  bundle: string;
+  skill: string;
+  bundlePath: string;
+  skillPath: string;
+  summary: string;
+};
+
 export type UninstallResult = {
   removedType: "bundle" | "skill";
   removedTarget: string;
@@ -254,6 +324,17 @@ type InstallOptions = {
 };
 
 type UninstallOptions = {
+  dryRun?: boolean;
+};
+
+type PublishOptions = {
+  storePath?: string;
+  dryRun?: boolean;
+};
+
+type UnpublishOptions = {
+  storePath?: string;
+  version?: string;
   dryRun?: boolean;
 };
 
@@ -303,6 +384,21 @@ const manifestSkillSchema = z.object({
   })
 });
 
+const manifestResolutionSchema = z.object({
+  requestedRef: z.string().min(1),
+  mode: z.enum(["floating", "tag", "version"]),
+  tag: z.string().min(1).optional(),
+  package: z.object({
+    registry: z.string().min(1),
+    namespace: z.string().min(1),
+    name: z.string().min(1)
+  }),
+  resolvedVersion: z.string().min(1),
+  digest: z.string().min(1),
+  publishedAt: z.string().min(1).optional(),
+  artifactUrl: z.string().min(1)
+});
+
 const manifestV1Schema = z.object({
   manifestVersion: z.number().int().positive(),
   bundles: z.array(z.object({
@@ -342,7 +438,8 @@ const manifestV3Schema = z.object({
     installedAt: z.string(),
     updatedAt: z.string(),
     skillDir: z.string(),
-    skills: z.array(manifestSkillSchema).default([])
+    skills: z.array(manifestSkillSchema).default([]),
+    resolution: manifestResolutionSchema.optional()
   }))
 });
 
@@ -482,6 +579,36 @@ program
   });
 
 program
+  .command("publish")
+  .argument("<bundleRef>", "path to bundle or built-in pack name")
+  .option("--store-path <path>", "bundle store root directory to publish into")
+  .option("--dry-run", "report publish changes without writing files")
+  .option("--verbose", "show detailed publish output")
+  .description("Publish a bundle into a filesystem-backed bundle store")
+  .action(async (bundleRef: string, options: PublishOptions & { verbose?: boolean }) => {
+    const result = await publishBundle(bundleRef, options);
+    console.log(result.summary);
+    if (options.verbose) {
+      console.log(`Store Path: ${result.storePath}`);
+      console.log(`Bundle Path: ${result.bundlePath}`);
+      console.log(`Catalog: ${result.catalogPath}`);
+      console.log(`Published Files: ${result.publishedFiles.join(", ")}`);
+    }
+  });
+
+program
+  .command("unpublish")
+  .argument("<bundleRefOrName>", "local bundle path, built-in pack name, or bundle name")
+  .option("--version <version>", "exact bundle version to remove when passing a bundle name")
+  .option("--store-path <path>", "bundle store root directory to remove from")
+  .option("--dry-run", "report unpublish changes without writing files")
+  .description("Remove a published bundle version from a filesystem-backed bundle store")
+  .action(async (bundleRefOrName: string, options: UnpublishOptions) => {
+    const result = await unpublishBundle(bundleRefOrName, options);
+    console.log(result.summary);
+  });
+
+program
   .command("uninstall")
   .argument("[bundleOrSkill]", "installed bundle name, skill name, or skill id")
   .option("--all", "remove all installed bundles and clean the .skillcast directory")
@@ -541,62 +668,36 @@ program
   .description("Scaffold a new bundle")
   .action(async (targetDir: string) => {
     const resolvedTarget = path.resolve(process.cwd(), targetDir);
-    const bundleName = path.basename(resolvedTarget);
-    const skillName = "example-skill";
-    const skillDir = path.join(resolvedTarget, "skills", skillName);
-
-    await fs.ensureDir(skillDir);
-
-    const bundleYaml = YAML.stringify({
-      name: bundleName,
-      version: "0.1.0",
-      description: "Describe this bundle",
-      skills: [
-        {
-          name: skillName,
-          path: `./skills/${skillName}`
-        }
-      ],
-      targets: ["generic-agent"]
-    });
-
-    const skillYaml = YAML.stringify({
-      id: `org.example.${bundleName}.${skillName}`,
-      name: skillName,
-      version: "0.1.0",
-      description: "Describe this skill",
-      entry: {
-        instructions: "./instructions.md"
-      },
-      inputs: [
-        {
-          name: "input",
-          type: "string",
-          required: true
-        }
-      ],
-      outputs: [
-        {
-          name: "result",
-          type: "string"
-        }
-      ],
-      compatibility: {
-        runtimes: ["generic-agent"]
-      }
-    });
-
-    const instructions = [
-      "You are a reusable skill.",
-      "",
-      "Define the behavior, constraints, and output contract here."
-    ].join("\n");
-
-    await fs.writeFile(path.join(resolvedTarget, "bundle.yaml"), bundleYaml, "utf8");
-    await fs.writeFile(path.join(skillDir, "skill.yaml"), skillYaml, "utf8");
-    await fs.writeFile(path.join(skillDir, "instructions.md"), instructions, "utf8");
-
+    await initBundleScaffold(resolvedTarget);
     console.log(`Initialized bundle scaffold at ${resolvedTarget}`);
+  });
+
+program
+  .command("add-skill")
+  .argument("<bundlePath>", "existing bundle root directory")
+  .argument("<skillName>", "skill folder and skill name to add")
+  .description("Add a new skill scaffold into an existing bundle")
+  .action(async (bundlePath: string, skillName: string) => {
+    const result = await addSkillToBundle(bundlePath, skillName);
+    console.log(result.summary);
+  });
+
+program
+  .command("help")
+  .argument("[commandName]", "optional command name")
+  .description("Show help for Skillcast or a specific command")
+  .action((commandName?: string) => {
+    if (!commandName) {
+      program.outputHelp();
+      return;
+    }
+
+    const command = program.commands.find((entry) => entry.name() === commandName || entry.aliases().includes(commandName));
+    if (!command) {
+      throw new Error(`Unknown command '${commandName}'.`);
+    }
+
+    command.outputHelp();
   });
 
 async function validateBundleRoot(rootPath: string): Promise<ValidatedBundle> {
@@ -746,24 +847,185 @@ async function readManifest(manifestPath: string): Promise<ManifestData> {
   };
 }
 
+async function initBundleScaffold(targetDir: string): Promise<void> {
+  const bundleName = path.basename(targetDir);
+  const skillName = "example-skill";
+  const skillDir = path.join(targetDir, "skills", skillName);
+
+  await fs.ensureDir(skillDir);
+  await fs.writeFile(path.join(targetDir, "bundle.yaml"), renderBundleYaml({
+    name: bundleName,
+    version: "0.1.0",
+    description: "Describe this bundle",
+    skills: [{ name: skillName, path: `./skills/${skillName}` }],
+    targets: ["generic-agent"]
+  }), "utf8");
+  await fs.writeFile(path.join(skillDir, "skill.yaml"), renderSkillYaml({
+    skillId: buildDefaultSkillId(bundleName, skillName),
+    skillName,
+    skillVersion: "0.1.0",
+    description: "Describe this skill",
+    runtimes: ["generic-agent"]
+  }), "utf8");
+  await fs.writeFile(path.join(skillDir, "instructions.md"), defaultSkillInstructions(), "utf8");
+}
+
+export async function addSkillToBundle(bundlePath: string, skillName: string): Promise<AddSkillResult> {
+  const resolvedBundlePath = path.resolve(process.cwd(), bundlePath);
+  const bundle = await validateBundleRoot(resolvedBundlePath);
+  const normalizedSkillName = skillName.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(normalizedSkillName)) {
+    throw new Error(`Invalid skill name '${skillName}'. Use letters, numbers, dots, dashes, or underscores.`);
+  }
+
+  if (bundle.skills.some((skill) => skill.config.name === normalizedSkillName)) {
+    throw new Error(`Bundle '${bundle.config.name}' already contains a skill named '${normalizedSkillName}'.`);
+  }
+
+  const skillDir = path.join(resolvedBundlePath, "skills", normalizedSkillName);
+  if (await fs.pathExists(skillDir)) {
+    throw new Error(`Skill directory already exists: ${toDisplayPath(skillDir)}`);
+  }
+
+  const nextBundleConfig: BundleConfig = {
+    ...bundle.config,
+    skills: [
+      ...bundle.config.skills,
+      {
+        name: normalizedSkillName,
+        path: `./skills/${normalizedSkillName}`
+      }
+    ]
+  };
+
+  await fs.ensureDir(skillDir);
+  await fs.writeFile(bundle.bundlePath, renderBundleYaml(nextBundleConfig), "utf8");
+  await fs.writeFile(path.join(skillDir, "skill.yaml"), renderSkillYaml({
+    skillId: buildDefaultSkillId(bundle.config.name, normalizedSkillName),
+    skillName: normalizedSkillName,
+    skillVersion: bundle.config.version,
+    description: `Describe the ${normalizedSkillName} skill`,
+    runtimes: bundle.config.targets
+  }), "utf8");
+  await fs.writeFile(path.join(skillDir, "instructions.md"), defaultSkillInstructions(), "utf8");
+
+  return {
+    bundle: bundle.config.name,
+    skill: normalizedSkillName,
+    bundlePath: toPosix(path.relative(process.cwd(), bundle.bundlePath)),
+    skillPath: toPosix(path.relative(process.cwd(), skillDir)),
+    summary: `Added skill '${normalizedSkillName}' to bundle '${bundle.config.name}'.`
+  };
+}
+
 async function writeManifest(manifestPath: string, manifest: ManifestData): Promise<void> {
   if (manifest.bundles.length === 0) {
     await cleanupSkillcastDirectory(path.dirname(manifestPath));
     return;
   }
 
-  const manifestDir = path.dirname(manifestPath);
-  const tmpManifestPath = path.join(manifestDir, `manifest.${process.pid}.${Date.now()}.tmp`);
-  await fs.ensureDir(manifestDir);
-  await fs.writeJson(tmpManifestPath, {
+  await writeJsonFileAtomic(manifestPath, {
     manifestVersion: MANIFEST_VERSION,
     bundles: sortManifestEntries(manifest.bundles.map(normalizeManifestEntry))
-  }, { spaces: 2 });
-  await fs.move(tmpManifestPath, manifestPath, { overwrite: true });
+  });
+}
+
+async function writeJsonFileAtomic(targetPath: string, value: unknown): Promise<void> {
+  const targetDir = path.dirname(targetPath);
+  const tmpPath = path.join(targetDir, `${path.basename(targetPath)}.${process.pid}.${Date.now()}.tmp`);
+  await fs.ensureDir(targetDir);
+  await fs.writeJson(tmpPath, value, { spaces: 2 });
+  await fs.move(tmpPath, targetPath, { overwrite: true });
 }
 
 function toPosix(value: string): string {
   return value.split(path.sep).join("/");
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split(/[-+]/)[0].split(".").map((part) => Number.parseInt(part, 10));
+  const rightParts = right.split(/[-+]/)[0].split(".").map((part) => Number.parseInt(part, 10));
+  const length = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const delta = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (delta !== 0) {
+      return delta;
+    }
+  }
+
+  return left.localeCompare(right);
+}
+
+function renderBundleYaml(config: {
+  name: string;
+  version: string;
+  description: string;
+  skills: Array<{ name: string; path: string }>;
+  targets: string[];
+}): string {
+  return YAML.stringify({
+    name: config.name,
+    version: config.version,
+    description: config.description,
+    skills: config.skills,
+    targets: config.targets
+  });
+}
+
+function renderSkillYaml(options: {
+  skillId: string;
+  skillName: string;
+  skillVersion: string;
+  description: string;
+  runtimes: string[];
+}): string {
+  return YAML.stringify({
+    id: options.skillId,
+    name: options.skillName,
+    version: options.skillVersion,
+    description: options.description,
+    entry: {
+      instructions: "./instructions.md"
+    },
+    inputs: [
+      {
+        name: "input",
+        type: "string",
+        required: true
+      }
+    ],
+    outputs: [
+      {
+        name: "result",
+        type: "string"
+      }
+    ],
+    compatibility: {
+      runtimes: options.runtimes
+    }
+  });
+}
+
+function defaultSkillInstructions(): string {
+  return [
+    "You are a reusable skill.",
+    "",
+    "Define the behavior, constraints, and output contract here."
+  ].join("\n");
+}
+
+function buildDefaultSkillId(bundleName: string, skillName: string): string {
+  return `org.example.${normalizeIdentifierSegment(bundleName)}.${normalizeIdentifierSegment(skillName)}`;
+}
+
+function normalizeIdentifierSegment(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    || "skill";
 }
 
 async function findBundles(searchPathInput: string): Promise<ValidatedBundle[]> {
@@ -1013,6 +1275,45 @@ async function withResolvedValidatedBundle<T>(
     });
   }
 
+  if (resolved.referenceType === "registry") {
+    const resolution = await resolveRegistryBundle(resolved);
+    return withMaterializedArtifactBundle(
+      resolution.requestedRef,
+      resolution.artifactUrl,
+      async (bundleRoot) => {
+        const bundle = await validateBundleRoot(bundleRoot);
+        if (bundle.config.version !== resolution.resolvedVersion) {
+          throw new Error(
+            `Resolved registry version '${resolution.resolvedVersion}' does not match bundle version '${bundle.config.version}' for '${resolved.displaySource}'.`
+          );
+        }
+
+        return task({
+          resolved,
+          bundle,
+          resolvedVersion: resolution.resolvedVersion,
+          resolvedDigest: resolution.digest,
+          resolution
+        });
+      },
+      {
+        expectedDigest: resolution.digest,
+        cacheDigest: resolution.digest
+      }
+    );
+  }
+
+  if (resolved.referenceType === "url") {
+    return withMaterializedArtifactBundle(
+      resolved.displaySource,
+      resolved.artifactUrl,
+      async (bundleRoot) => {
+        const bundle = await validateBundleRoot(bundleRoot);
+        return task({ resolved, bundle });
+      }
+    );
+  }
+
   throw new Error(`Unsupported bundle reference: ${bundleRef}`);
 }
 
@@ -1024,6 +1325,20 @@ async function resolveBundleReference(bundleRef: string): Promise<ResolvedBundle
       rootPath: explicitRoot,
       referenceType: "path",
       displaySource: toDisplayPath(explicitRoot)
+    };
+  }
+
+  const remoteRef = parseResolvedRemoteBundleReference(bundleRef);
+  if (remoteRef) {
+    return remoteRef;
+  }
+
+  if (/^https?:\/\//.test(bundleRef)) {
+    return {
+      input: bundleRef,
+      referenceType: "url",
+      displaySource: bundleRef,
+      artifactUrl: bundleRef
     };
   }
 
@@ -1051,7 +1366,7 @@ async function resolveBundleReference(bundleRef: string): Promise<ResolvedBundle
 }
 
 function assertLocalBundleReference(reference: ResolvedBundleReference): asserts reference is LocalBundleReference {
-  if (reference.referenceType === "store") {
+  if (reference.referenceType !== "builtin" && reference.referenceType !== "path") {
     throw new Error(
       `Remote bundle references are not supported by this local-only code path: ${reference.displaySource}`
     );
@@ -1064,19 +1379,42 @@ function parseDefaultStoreBundleReference(input: string): StoreBundleReference |
     return null;
   }
 
+  const match = parseBundleNameAndOptionalVersion(input);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    input,
+    referenceType: "store",
+    displaySource: input,
+    bundleName: match.name,
+    requestedVersion: match.version,
+    baseUrl
+  };
+}
+
+function parseBundleNameAndOptionalVersion(input: string): { name: string; version?: string } | null {
   const match = input.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)(?:@(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?))?$/);
   if (!match) {
     return null;
   }
 
-  const [, bundleName, requestedVersion] = match;
   return {
-    input,
-    referenceType: "store",
-    displaySource: input,
-    bundleName,
-    requestedVersion,
-    baseUrl
+    name: match[1],
+    version: match[2]
+  };
+}
+
+function parseBundleNameAndVersion(input: string): { name: string; version: string } | null {
+  const parsed = parseBundleNameAndOptionalVersion(input);
+  if (!parsed?.version) {
+    return null;
+  }
+
+  return {
+    name: parsed.name,
+    version: parsed.version
   };
 }
 
@@ -1084,8 +1422,68 @@ export function parseRemoteBundleReference(_input: string): null {
   return null;
 }
 
+function parseResolvedRemoteBundleReference(input: string): RegistryBundleReference | null {
+  let registry = "default";
+  let namespace = "";
+  let bundleName = "";
+  let selectorValue: string | undefined;
+
+  const explicitMatch = input.match(/^skillcast:\/\/([^/]+)\/([^/]+)\/([^@/]+)(?:@(.+))?$/);
+  if (explicitMatch) {
+    [, registry, namespace, bundleName, selectorValue] = explicitMatch;
+  } else {
+    const implicitMatch = input.match(/^skillcast:([^/]+)\/([^@/]+)(?:@(.+))?$/);
+    if (!implicitMatch) {
+      return null;
+    }
+    [, namespace, bundleName, selectorValue] = implicitMatch;
+  }
+
+  const selector = !selectorValue
+    ? { mode: "floating" as const }
+    : isExactVersionSelector(selectorValue)
+      ? { mode: "version" as const, value: selectorValue }
+      : { mode: "tag" as const, value: selectorValue };
+
+  return {
+    input,
+    referenceType: "registry",
+    displaySource: input,
+    requestedRef: input,
+    registry,
+    namespace,
+    bundleName,
+    selector
+  };
+}
+
 function isExactVersionSelector(value: string): boolean {
   return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(value);
+}
+
+async function resolveRegistryBundle(reference: RegistryBundleReference): Promise<RegistryResolution> {
+  const baseUrl = getRegistryBaseUrl(reference.registry);
+  const url = new URL(`${baseUrl}/v0/resolve/${encodeURIComponent(reference.namespace)}/${encodeURIComponent(reference.bundleName)}`);
+  if (reference.selector.mode === "version" && reference.selector.value) {
+    url.searchParams.set("version", reference.selector.value);
+  } else if (reference.selector.mode === "tag" && reference.selector.value) {
+    url.searchParams.set("tag", reference.selector.value);
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json"
+    }
+  });
+  if (!response.ok) {
+    throw new Error(await buildRegistryError(response, reference.requestedRef));
+  }
+
+  const payload = z.object({
+    resolution: manifestResolutionSchema
+  }).parse(await response.json());
+
+  return payload.resolution;
 }
 
 async function resolveStoreBundle(reference: StoreBundleReference): Promise<{
@@ -1336,7 +1734,8 @@ function readSkillcastConfigSync(): SkillcastConfig {
 
     const parsed = z.object({
       defaultRegistry: z.string().min(1).optional(),
-      defaultBundleStoreUrl: z.string().min(1).optional()
+      defaultBundleStoreUrl: z.string().min(1).optional(),
+      defaultBundleStorePublishPath: z.string().min(1).optional()
     }).safeParse(fs.readJsonSync(candidate));
     if (parsed.success) {
       return parsed.data;
@@ -1404,6 +1803,10 @@ function normalizeSourceDisplay(source: string, sourceType: ManifestSourceType):
 }
 
 function normalizeManifestEntry(entry: ManifestEntry): ManifestEntry {
+  if (entry.sourceType === "registry" && !entry.resolution) {
+    throw new Error(`Manifest entry for bundle '${entry.bundle}' is missing required resolution metadata.`);
+  }
+
   const skills = entry.skills
     .map((skill) => ({
       ...skill,
@@ -1420,7 +1823,8 @@ function normalizeManifestEntry(entry: ManifestEntry): ManifestEntry {
     source: normalizeSourceDisplay(entry.source, entry.sourceType),
     installedSkills: uniqueSkillNames(skills.map((skill) => skill.name)),
     skillDir: toPosix(entry.skillDir),
-    skills
+    skills,
+    resolution: entry.resolution
   };
 }
 
@@ -1491,7 +1895,11 @@ async function readDefaultStoreCatalog(): Promise<RemoteStoreCatalogEntry[]> {
     return [];
   }
 
-  return fetchRemoteStoreCatalog(baseUrl);
+  try {
+    return await fetchRemoteStoreCatalog(baseUrl);
+  } catch {
+    return [];
+  }
 }
 
 export async function validateBundle(bundleRef: string): Promise<ValidatedBundle> {
@@ -1500,13 +1908,14 @@ export async function validateBundle(bundleRef: string): Promise<ValidatedBundle
 }
 
 export async function inspectBundle(bundleRef: string, options: { installed?: boolean } = {}): Promise<InspectPayload> {
-  return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle, resolvedVersion }) => {
+  return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle, resolvedVersion, resolvedDigest }) => {
     const payload: InspectPayload = {
       name: bundle.config.name,
       version: bundle.config.version,
       description: bundle.config.description,
       source: resolved.displaySource,
       resolvedVersion,
+      resolvedDigest,
       targets: bundle.config.targets,
       skills: bundle.skills.map((skill) => ({
         id: skill.config.id,
@@ -1642,6 +2051,92 @@ export async function installBundle(bundleRef: string, options: InstallOptions =
   );
 }
 
+export async function publishBundle(bundleRef: string, options: PublishOptions = {}): Promise<PublishResult> {
+  return withResolvedValidatedBundle(bundleRef, async ({ resolved, bundle }) => {
+    assertLocalBundleReference(resolved);
+    const storePath = resolveBundleStorePublishPath(options.storePath);
+    const versionRoot = path.join(storePath, "bundles", bundle.config.name, bundle.config.version);
+    const catalogPath = path.join(storePath, "catalog.json");
+    const publishedFiles = await collectPublishFileList(bundle);
+
+    return withStoreLock(storePath, async () => {
+      const existingCatalog = await readStoreCatalogFile(catalogPath);
+      const existingBundle = existingCatalog.find((entry) => entry.name === bundle.config.name);
+      if (existingBundle?.versions.includes(bundle.config.version) || await fs.pathExists(versionRoot)) {
+        throw new Error(
+          `Bundle '${bundle.config.name}@${bundle.config.version}' already exists in the bundle store at ${toDisplayPath(storePath)}.`
+        );
+      }
+
+      if (!options.dryRun) {
+        await writeBundleVersionToStore(bundle, versionRoot);
+        await writeStoreCatalogFile(catalogPath, updateStoreCatalog(existingCatalog, bundle));
+      }
+
+      return {
+        name: bundle.config.name,
+        version: bundle.config.version,
+        storePath: toPosix(storePath),
+        bundlePath: toPosix(path.relative(storePath, versionRoot)),
+        catalogPath: toPosix(path.relative(storePath, catalogPath)),
+        publishedFiles,
+        dryRun: Boolean(options.dryRun),
+        summary: options.dryRun
+          ? `Dry run: would publish ${bundle.config.name}@${bundle.config.version} to ${toDisplayPath(storePath)}.`
+          : `Published ${bundle.config.name}@${bundle.config.version} to ${toDisplayPath(storePath)}.`
+      };
+    });
+  });
+}
+
+export async function unpublishBundle(bundleRefOrName: string, options: UnpublishOptions = {}): Promise<UnpublishResult> {
+  const target = await resolveUnpublishTarget(bundleRefOrName, options.version);
+  const storePath = resolveBundleStorePublishPath(options.storePath);
+  const versionRoot = path.join(storePath, "bundles", target.name, target.version);
+  const catalogPath = path.join(storePath, "catalog.json");
+
+  return withStoreLock(storePath, async () => {
+    const existingCatalog = await readStoreCatalogFile(catalogPath);
+    const existingBundle = existingCatalog.find((entry) => entry.name === target.name);
+    if (!existingBundle || !existingBundle.versions.includes(target.version) || !(await fs.pathExists(versionRoot))) {
+      throw new Error(
+        `Bundle '${target.name}@${target.version}' was not found in the bundle store at ${toDisplayPath(storePath)}.`
+      );
+    }
+
+    const nextCatalog = removeStoreCatalogVersion(existingCatalog, target.name, target.version);
+    if (!options.dryRun) {
+      await fs.remove(versionRoot);
+      const bundleRoot = path.dirname(versionRoot);
+      if (await fs.pathExists(bundleRoot)) {
+        const remainingEntries = await fs.readdir(bundleRoot);
+        if (remainingEntries.length === 0) {
+          await fs.remove(bundleRoot);
+        }
+      }
+
+      if (nextCatalog.length === 0) {
+        await fs.remove(catalogPath);
+      } else {
+        await writeStoreCatalogFile(catalogPath, nextCatalog);
+      }
+    }
+
+    return {
+      name: target.name,
+      version: target.version,
+      storePath: toPosix(storePath),
+      bundlePath: toPosix(path.relative(storePath, versionRoot)),
+      catalogPath: toPosix(path.relative(storePath, catalogPath)),
+      removedBundle: !nextCatalog.some((entry) => entry.name === target.name),
+      dryRun: Boolean(options.dryRun),
+      summary: options.dryRun
+        ? `Dry run: would unpublish ${target.name}@${target.version} from ${toDisplayPath(storePath)}.`
+        : `Unpublished ${target.name}@${target.version} from ${toDisplayPath(storePath)}.`
+    };
+  });
+}
+
 async function installBundleUnlocked(bundleRef: string, options: InstallOptions = {}): Promise<InstallResult> {
   const resolved = await resolveBundleReference(bundleRef);
   assertLocalBundleReference(resolved);
@@ -1653,7 +2148,7 @@ async function installLoadedBundleUnlocked(
   loaded: LoadedValidatedBundle,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
-  const { resolved, bundle, resolvedVersion } = loaded;
+  const { resolved, bundle, resolvedVersion, resolvedDigest, resolution } = loaded;
   const repoRoot = process.cwd();
   const skillcastDir = path.join(repoRoot, ".skillcast");
   const installedSkillsDir = path.join(skillcastDir, "skills");
@@ -1799,7 +2294,8 @@ async function installLoadedBundleUnlocked(
       installedAt: existingBundle?.installedAt ?? now,
       updatedAt: now,
       skillDir: toPosix(path.relative(repoRoot, installedSkillsDir)),
-      skills: desiredRecords
+      skills: desiredRecords,
+      resolution
     });
 
     const filteredBundles = nextManifestBundles
@@ -1819,6 +2315,7 @@ async function installLoadedBundleUnlocked(
     version: bundle.config.version,
     source: resolved.displaySource,
     resolvedVersion,
+    resolvedDigest,
     skillDir: toPosix(path.relative(repoRoot, installedSkillsDir)),
     manifestPath: toPosix(path.relative(repoRoot, manifestPath)),
     changedSkills: uniqueSkillNames(changedSkills),
@@ -1829,6 +2326,157 @@ async function installLoadedBundleUnlocked(
       ? `Dry run: ${(existingBundle ? "updated" : "installed")} ${bundle.config.name}@${bundle.config.version}.`
       : `${existingBundle ? "Updated" : "Installed"} ${bundle.config.name}@${bundle.config.version}.`
   };
+}
+
+function resolveBundleStorePublishPath(explicitPath?: string): string {
+  const configuredPath = explicitPath ?? readSkillcastConfigSync().defaultBundleStorePublishPath;
+  if (!configuredPath) {
+    throw new Error("Missing bundle store publish path. Pass '--store-path <path>' or set 'defaultBundleStorePublishPath' in skillcast.config.json.");
+  }
+
+  return path.resolve(process.cwd(), configuredPath);
+}
+
+async function resolveUnpublishTarget(input: string, explicitVersion?: string): Promise<{ name: string; version: string }> {
+  const explicitRoot = path.resolve(process.cwd(), input);
+  if (await fs.pathExists(path.join(explicitRoot, "bundle.yaml"))) {
+    const bundle = await validateBundleRoot(explicitRoot);
+    return {
+      name: bundle.config.name,
+      version: explicitVersion ?? bundle.config.version
+    };
+  }
+
+  const builtInRoot = await resolvePackSearchPath();
+  const catalog = await readBuiltInCatalog(builtInRoot);
+  const catalogMatch = catalog.find((entry) => entry.name === input);
+  if (catalogMatch) {
+    const bundle = await validateBundleRoot(path.resolve(builtInRoot, catalogMatch.path));
+    return {
+      name: bundle.config.name,
+      version: explicitVersion ?? bundle.config.version
+    };
+  }
+
+  const parsed = parseBundleNameAndVersion(input);
+  if (parsed) {
+    return {
+      name: parsed.name,
+      version: explicitVersion ?? parsed.version
+    };
+  }
+
+  if (explicitVersion) {
+    return {
+      name: input,
+      version: explicitVersion
+    };
+  }
+
+  throw new Error("Unpublish requires either a local bundle reference or an exact '<bundle>@<version>' target.");
+}
+
+async function collectPublishFileList(bundle: ValidatedBundle): Promise<string[]> {
+  const publishedFiles = new Set<string>(["bundle.yaml"]);
+
+  for (const skill of bundle.skills) {
+    const skillYamlPath = path.join(skill.directory, "skill.yaml");
+    publishedFiles.add(toPosix(path.relative(bundle.rootPath, skillYamlPath)));
+    publishedFiles.add(toPosix(path.relative(bundle.rootPath, skill.instructionsPath)));
+  }
+
+  return [...publishedFiles].sort((left, right) => left.localeCompare(right));
+}
+
+async function writeBundleVersionToStore(bundle: ValidatedBundle, versionRoot: string): Promise<void> {
+  const tmpVersionRoot = `${versionRoot}.${process.pid}.${Date.now()}.tmp`;
+  const publishedFiles = await collectPublishFileList(bundle);
+
+  await fs.remove(tmpVersionRoot);
+  await fs.ensureDir(tmpVersionRoot);
+
+  for (const relativePath of publishedFiles) {
+    const sourcePath = path.resolve(bundle.rootPath, relativePath);
+    const targetPath = path.resolve(tmpVersionRoot, relativePath);
+
+    if (!isPathWithin(targetPath, tmpVersionRoot)) {
+      throw new Error(`Refusing to publish outside the bundle store root: ${relativePath}`);
+    }
+
+    await fs.ensureDir(path.dirname(targetPath));
+    await fs.copyFile(sourcePath, targetPath);
+  }
+
+  await fs.move(tmpVersionRoot, versionRoot, { overwrite: false });
+}
+
+async function readStoreCatalogFile(catalogPath: string): Promise<RemoteStoreCatalogEntry[]> {
+  if (!(await fs.pathExists(catalogPath))) {
+    return [];
+  }
+
+  const catalog = remoteStoreCatalogSchema.parse(await fs.readJson(catalogPath));
+  return catalog.bundles;
+}
+
+function updateStoreCatalog(existing: RemoteStoreCatalogEntry[], bundle: ValidatedBundle): RemoteStoreCatalogEntry[] {
+  const grouped = new Map(existing.map((entry) => [entry.name, {
+    name: entry.name,
+    description: entry.description,
+    versions: entry.versions.slice()
+  }]));
+
+  const current = grouped.get(bundle.config.name) ?? {
+    name: bundle.config.name,
+    description: bundle.config.description,
+    versions: []
+  };
+  current.description = bundle.config.description;
+  current.versions.push(bundle.config.version);
+  grouped.set(bundle.config.name, current);
+
+  return [...grouped.values()]
+    .map((entry) => {
+      const versions = [...new Set(entry.versions)].sort(compareVersions);
+      return {
+        name: entry.name,
+        description: entry.description,
+        latestVersion: versions[versions.length - 1],
+        versions
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function removeStoreCatalogVersion(existing: RemoteStoreCatalogEntry[], bundleName: string, version: string): RemoteStoreCatalogEntry[] {
+  return existing
+    .flatMap((entry) => {
+      if (entry.name !== bundleName) {
+        return [entry];
+      }
+
+      const versions = entry.versions
+        .filter((candidate) => candidate !== version)
+        .sort(compareVersions);
+      if (versions.length === 0) {
+        return [];
+      }
+
+      return [{
+        name: entry.name,
+        description: entry.description,
+        latestVersion: versions[versions.length - 1],
+        versions
+      }];
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function writeStoreCatalogFile(catalogPath: string, bundles: RemoteStoreCatalogEntry[]): Promise<void> {
+  await writeJsonFileAtomic(catalogPath, {
+    catalogVersion: 1,
+    bundles
+  });
 }
 
 export async function uninstallBundleOrSkill(bundleOrSkill: string, options: UninstallOptions = {}): Promise<UninstallResult> {
@@ -2262,6 +2910,15 @@ async function cleanupSkillcastDirectory(skillcastDir: string): Promise<void> {
 
 async function withSkillcastLock<T>(repoRoot: string, task: () => Promise<T>): Promise<T> {
   const lockPath = path.join(repoRoot, ".skillcast.lock");
+  return withFileLock(lockPath, task);
+}
+
+async function withStoreLock<T>(storeRoot: string, task: () => Promise<T>): Promise<T> {
+  const lockPath = path.join(storeRoot, ".skillcast-store.lock");
+  return withFileLock(lockPath, task);
+}
+
+async function withFileLock<T>(lockPath: string, task: () => Promise<T>): Promise<T> {
   const timeoutMs = 5000;
   const retryDelayMs = 100;
   const startedAt = Date.now();
@@ -2269,7 +2926,7 @@ async function withSkillcastLock<T>(repoRoot: string, task: () => Promise<T>): P
 
   while (!acquired) {
     try {
-      await fs.ensureDir(repoRoot);
+      await fs.ensureDir(path.dirname(lockPath));
       await fs.writeFile(lockPath, String(process.pid), { encoding: "utf8", flag: "wx" });
       acquired = true;
     } catch (error) {
@@ -2277,7 +2934,7 @@ async function withSkillcastLock<T>(repoRoot: string, task: () => Promise<T>): P
         await wait(retryDelayMs);
         continue;
       }
-      throw new Error(`Could not acquire Skillcast lock at ${toDisplayPath(lockPath)}.`);
+      throw new Error(`Could not acquire lock at ${toDisplayPath(lockPath)}.`);
     }
   }
 

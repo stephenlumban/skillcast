@@ -27,8 +27,13 @@
 - added `skillcast inspect <bundle> --installed` to show installed-state changes during inspection
 - added `cast list skills -i` and `cast list skills --installed` to list repo-local installed skills
 - added `skillcast repair` to report missing and orphaned install state, with `--write` for safe manifest cleanup
+- added `skillcast publish` and `skillcast unpublish` for filesystem-backed bundle store management
 - reduced default CLI output noise; detailed filesystem paths and metadata now require `--verbose` in list/install flows
 - improved error messages for ambiguous or incomplete commands such as `list skills`
+
+### Authoring
+
+- documented the human authoring flow in `README.md`: create a bundle, validate it locally, publish it to a bundle store, and unpublish exact versions when needed
 
 ### Fixes
 
